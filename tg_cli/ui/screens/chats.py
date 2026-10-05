@@ -55,6 +55,7 @@ class ChatsScreen(Screen):
         Binding("m", "toggle_mute", "Mute", show=False),
         Binding("r", "mark_read", "Mark Read", show=False),
         Binding("R", "mark_unread", "Mark Unread", show=False),
+        Binding("shift+r", "mark_unread", "Mark Unread", show=False),
         Binding("d", "delete_chat", "Delete", show=False),
         Binding("u", "undo_action", "Undo", show=False),
         Binding("f2", "next_account", "Next Account", show=False),
@@ -308,6 +309,7 @@ class ChatsScreen(Screen):
         new_state = not targets[0].archived
 
         self.gateway.archive_chats(self.account.user_id, target_ids, archived=new_state)
+        self.chat_list.clear_selection()
         self.refresh_chats()
 
         def do_undo() -> None:
@@ -327,6 +329,7 @@ class ChatsScreen(Screen):
         new_state = not targets[0].muted
 
         self.gateway.mute_chats(self.account.user_id, target_ids, muted=new_state)
+        self.chat_list.clear_selection()
         self.refresh_chats()
 
         def do_undo() -> None:
@@ -345,12 +348,12 @@ class ChatsScreen(Screen):
         old_unreads = {c.chat_id: c.unread_count for c in targets}
 
         self.gateway.mark_chats_read(self.account.user_id, target_ids, read=True)
+        self.chat_list.clear_selection()
         self.refresh_chats()
 
         def do_undo() -> None:
             for cid, count in old_unreads.items():
-                if cid in self.gateway.chats.get(self.account.user_id, {}):
-                    self.gateway.chats[self.account.user_id][cid].unread_count = count
+                self.gateway.mark_chats_read(self.account.user_id, [cid], read=(count == 0))
             self.refresh_chats()
 
         self._set_undoable(f"Marked {len(targets)} chat(s) as read", do_undo)
@@ -363,12 +366,12 @@ class ChatsScreen(Screen):
         old_unreads = {c.chat_id: c.unread_count for c in targets}
 
         self.gateway.mark_chats_read(self.account.user_id, target_ids, read=False)
+        self.chat_list.clear_selection()
         self.refresh_chats()
 
         def do_undo() -> None:
             for cid, count in old_unreads.items():
-                if cid in self.gateway.chats.get(self.account.user_id, {}):
-                    self.gateway.chats[self.account.user_id][cid].unread_count = count
+                self.gateway.mark_chats_read(self.account.user_id, [cid], read=(count == 0))
             self.refresh_chats()
 
         self._set_undoable(f"Marked {len(targets)} chat(s) as unread", do_undo)
@@ -386,14 +389,13 @@ class ChatsScreen(Screen):
             old_chats = [
                 self.gateway.get_chat(self.account.user_id, cid) for cid in target_ids
             ]
+            valid_old_chats = [c for c in old_chats if c is not None]
             self.gateway.delete_chats(self.account.user_id, target_ids)
             self.chat_list.clear_selection()
             self.refresh_chats()
 
             def do_undo() -> None:
-                for chat in old_chats:
-                    if chat is not None:
-                        self.gateway.chats[self.account.user_id][chat.chat_id] = chat
+                self.gateway.restore_chats(self.account.user_id, valid_old_chats)
                 self.refresh_chats()
 
             self._set_undoable(f"Deleted {count} chat(s)", do_undo)
@@ -447,16 +449,13 @@ class ChatsScreen(Screen):
                 self._pending_confirm = None
                 self.status_bar.set_prompt(None)
                 on_confirm()
-                event.prevent_default()
-                event.stop()
-                return
             elif event.character in ("n", "N") or event.key == "escape":
                 self._pending_confirm = None
                 self.status_bar.set_prompt(None)
                 self.status_bar.set_status("Action cancelled.")
-                event.prevent_default()
-                event.stop()
-                return
+            event.prevent_default()
+            event.stop()
+            return
 
     def action_handle_escape(self) -> None:
         # Esc stack rule:

@@ -36,6 +36,7 @@ from tg_cli.store.repo import (
     mute_chats as repo_mute_chats,
     save_draft as repo_save_draft,
     upsert_account as repo_upsert_account,
+    upsert_chats as repo_upsert_chats,
     upsert_messages as repo_upsert_messages,
 )
 from tg_cli.telegram.gateway import Gateway
@@ -220,6 +221,13 @@ class TelethonGateway:
         chat_ids: Sequence[int],
     ) -> None:
         repo_delete_chats(self.conn, account_id, chat_ids)
+
+    def restore_chats(
+        self,
+        account_id: int,
+        chats: Sequence[Chat],
+    ) -> None:
+        repo_upsert_chats(self.conn, chats)
 
     # Login management methods
     def start_login(self, phone: str, api_id: int, api_hash: str) -> None:

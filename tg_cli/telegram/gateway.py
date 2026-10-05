@@ -110,6 +110,14 @@ class Gateway(Protocol):
         """Delete chats for current user."""
         ...
 
+    def restore_chats(
+        self,
+        account_id: int,
+        chats: Sequence[Chat],
+    ) -> None:
+        """Restore chats after undoing deletion."""
+        ...
+
     def get_draft(self, account_id: int, chat_id: int) -> Draft | None:
         """Retrieve stored draft for a chat."""
         ...

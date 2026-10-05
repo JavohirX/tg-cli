@@ -454,6 +454,14 @@ class FakeGateway:
         for cid in chat_ids:
             self.chats.get(account_id, {}).pop(cid, None)
 
+    def restore_chats(
+        self,
+        account_id: int,
+        chats: Sequence[Chat],
+    ) -> None:
+        for c in chats:
+            self.chats.setdefault(account_id, {})[c.chat_id] = c
+
     def get_draft(self, account_id: int, chat_id: int) -> Draft | None:
         return self.drafts.get((account_id, chat_id))
 
