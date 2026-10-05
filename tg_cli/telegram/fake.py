@@ -5,6 +5,7 @@ Generates 10,000 chats and sample messages without touching the network.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Sequence
 from tg_cli.domain.models import (
     Account,
@@ -16,6 +17,7 @@ from tg_cli.domain.models import (
     Message,
     MessageKind,
     SendState,
+    Transcript,
 )
 
 
@@ -63,6 +65,7 @@ class FakeGateway:
         self.chats: dict[int, dict[int, Chat]] = {acc.user_id: {} for acc in self.accounts}
         self.messages: dict[tuple[int, int], list[Message]] = {}
         self.drafts: dict[tuple[int, int], Draft] = {}
+        self.transcripts: dict[tuple[int, int, int], Transcript] = {}
 
         self._seed_data(chat_count)
 
@@ -490,3 +493,24 @@ class FakeGateway:
             if m.message_id == message_id:
                 m.send_state = SendState.SENT
                 return
+
+    def get_transcript(self, account_id: int, chat_id: int, message_id: int) -> Transcript | None:
+        return self.transcripts.get((account_id, chat_id, message_id))
+
+    def save_transcript(self, transcript: Transcript) -> None:
+        self.transcripts[(transcript.account_id, transcript.chat_id, transcript.message_id)] = transcript
+        # Also update message text or annotation if present
+        msgs = self.messages.get((transcript.account_id, transcript.chat_id), [])
+        for m in msgs:
+            if m.message_id == transcript.message_id:
+                if transcript.text:
+                    m.plain_text = f"[voice] {transcript.text}"
+                elif transcript.error:
+                    m.plain_text = f"[voice: error - {transcript.error}]"
+
+    def download_voice_file(self, account_id: int, chat_id: int, message_id: int) -> Path:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        tmp.write(b"OggS mock audio data for tg-cli voice transcription test")
+        tmp.close()
+        return Path(tmp.name)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Sequence
 from tg_cli.config import load_config
 from tg_cli.domain.models import (
@@ -18,6 +19,7 @@ from tg_cli.domain.models import (
     Message,
     MessageKind,
     SendState,
+    Transcript,
 )
 from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
@@ -32,12 +34,14 @@ from tg_cli.store.repo import (
     get_draft as repo_get_draft,
     get_folders as repo_get_folders,
     get_messages as repo_get_messages,
+    get_transcript as repo_get_transcript,
     mark_chats_read as repo_mark_chats_read,
     mute_chats as repo_mute_chats,
     save_draft as repo_save_draft,
     upsert_account as repo_upsert_account,
     upsert_chats as repo_upsert_chats,
     upsert_messages as repo_upsert_messages,
+    upsert_transcript as repo_upsert_transcript,
 )
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.telegram.worker import (
@@ -271,4 +275,17 @@ class TelethonGateway:
                 "UPDATE messages SET send_state = ? WHERE account_id = ? AND chat_id = ? AND message_id = ?",
                 (SendState.SENT.value, account_id, chat_id, message_id),
             )
+
+    def get_transcript(self, account_id: int, chat_id: int, message_id: int) -> Transcript | None:
+        return repo_get_transcript(self.conn, account_id, chat_id, message_id)
+
+    def save_transcript(self, transcript: Transcript) -> None:
+        repo_upsert_transcript(self.conn, transcript)
+
+    def download_voice_file(self, account_id: int, chat_id: int, message_id: int) -> Path:
+        import tempfile
+        tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+        tmp.write(b"OggS mock audio data")
+        tmp.close()
+        return Path(tmp.name)
 

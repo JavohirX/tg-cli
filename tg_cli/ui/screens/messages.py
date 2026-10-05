@@ -17,13 +17,16 @@ from textual.containers import Container, Vertical
 from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Input, Static
+from pathlib import Path
 from tg_cli.domain.models import (
     Account,
     Chat,
     DateSeparator,
     Draft,
     Message,
+    MessageKind,
     SendState,
+    Transcript,
     UnreadDivider,
 )
 from tg_cli.domain.render import format_date_separator, render_message
@@ -245,10 +248,16 @@ class MessagesScreen(Screen):
 
         if isinstance(item, Message):
             expanded = item.message_id in self.expanded_message_ids
+            transcript_text = None
+            if item.kind == MessageKind.VOICE:
+                tr = self.gateway.get_transcript(self.account.user_id, self.chat.chat_id, item.message_id)
+                if tr:
+                    transcript_text = tr.text if tr.text else f"[error: {tr.error}]"
             lines = render_message(
                 message=item,
                 width=width,
                 expanded=expanded,
+                transcript=transcript_text,
                 is_cursor=is_cursor,
                 is_selected=is_selected,
             )
@@ -437,18 +446,76 @@ class MessagesScreen(Screen):
         self.status_bar.set_status(f"Deleted {len(target_ids)} message(s).")
 
     def action_transcribe_focused(self) -> None:
-        if self.is_write_mode:
-            return
-        focused = self.message_list.get_focused_item()
-        if focused is not None and isinstance(focused, Message):
-            self.status_bar.set_status(f"Transcription for #{focused.message_id} will run via Gemini in Phase 7.")
+        self._transcribe_focused(force=False)
 
     def action_retranscribe_focused(self) -> None:
+        self._transcribe_focused(force=True)
+
+    def _transcribe_focused(self, force: bool = False) -> None:
         if self.is_write_mode:
             return
         focused = self.message_list.get_focused_item()
-        if focused is not None and isinstance(focused, Message):
-            self.status_bar.set_status(f"Forced re-transcription for #{focused.message_id} scheduled.")
+        if not isinstance(focused, Message):
+            return
+
+        if focused.kind != MessageKind.VOICE:
+            self.status_bar.set_status("Selected message is not a voice message.", is_error=True)
+            return
+
+        # Check existing transcript in cache if not forced
+        if not force:
+            existing = self.gateway.get_transcript(self.account.user_id, self.chat.chat_id, focused.message_id)
+            if existing and existing.text:
+                self.status_bar.set_status(f"Transcript (cached): {existing.text[:40]}")
+                self.message_list.refresh()
+                return
+
+        # Perform transcription
+        self.status_bar.set_status(f"Downloading voice message #{focused.message_id}...")
+
+        temp_audio: Path | None = None
+        try:
+            temp_audio = self.gateway.download_voice_file(
+                self.account.user_id,
+                self.chat.chat_id,
+                focused.message_id,
+            )
+            self.status_bar.set_status("Transcribing audio with Gemini...")
+
+            from tg_cli.transcribe.gemini import GeminiTranscriber
+            transcriber = getattr(self.app, "transcriber", None) or GeminiTranscriber()
+
+            transcript_text = transcriber.transcribe_audio(temp_audio)
+
+            record = Transcript(
+                account_id=self.account.user_id,
+                chat_id=self.chat.chat_id,
+                message_id=focused.message_id,
+                text=transcript_text,
+                model="gemini",
+                created_at=datetime.now(timezone.utc),
+            )
+            self.gateway.save_transcript(record)
+            self.status_bar.set_status(f"Transcribed: {transcript_text[:50]}")
+            self.message_list.refresh()
+        except Exception as exc:
+            err_msg = str(exc)
+            fail_record = Transcript(
+                account_id=self.account.user_id,
+                chat_id=self.chat.chat_id,
+                message_id=focused.message_id,
+                error=err_msg,
+                created_at=datetime.now(timezone.utc),
+            )
+            self.gateway.save_transcript(fail_record)
+            self.status_bar.set_status(f"Transcription failed: {err_msg}", is_error=True)
+            self.message_list.refresh()
+        finally:
+            if temp_audio is not None and temp_audio.exists():
+                try:
+                    temp_audio.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def action_yank_focused(self) -> None:
         if self.is_write_mode:

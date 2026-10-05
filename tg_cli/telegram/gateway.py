@@ -4,8 +4,9 @@ Screens never import Telethon; they interact only with this interface.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol, Sequence
-from tg_cli.domain.models import Account, Chat, Draft, Folder, Message
+from tg_cli.domain.models import Account, Chat, Draft, Folder, Message, Transcript
 
 
 class Gateway(Protocol):
@@ -133,4 +134,16 @@ class Gateway(Protocol):
 
     def retry_failed_message(self, account_id: int, chat_id: int, message_id: int) -> None:
         """Retry sending a failed message."""
+        ...
+
+    def get_transcript(self, account_id: int, chat_id: int, message_id: int) -> Transcript | None:
+        """Get cached transcript for a voice message."""
+        ...
+
+    def save_transcript(self, transcript: Transcript) -> None:
+        """Store transcript for a voice message."""
+        ...
+
+    def download_voice_file(self, account_id: int, chat_id: int, message_id: int) -> Path:
+        """Download voice message audio to a temporary file path."""
         ...

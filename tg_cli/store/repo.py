@@ -16,6 +16,7 @@ from tg_cli.domain.models import (
     Message,
     MessageKind,
     SendState,
+    Transcript,
 )
 
 
@@ -439,4 +440,52 @@ def clear_draft(conn: sqlite3.Connection, account_id: int, chat_id: int) -> None
         conn.execute(
             "DELETE FROM drafts WHERE account_id = ? AND chat_id = ?",
             (account_id, chat_id),
+        )
+
+
+# Transcript operations
+def get_transcript(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    message_id: int,
+) -> Transcript | None:
+    row = conn.execute(
+        "SELECT * FROM transcripts WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+        (account_id, chat_id, message_id),
+    ).fetchone()
+    if not row:
+        return None
+    return Transcript(
+        account_id=row["account_id"],
+        chat_id=row["chat_id"],
+        message_id=row["message_id"],
+        text=row["text"] or "",
+        model=row["model"] or "",
+        error=row["error"] or "",
+        created_at=_parse_iso(row["created_at"]),
+    )
+
+
+def upsert_transcript(conn: sqlite3.Connection, transcript: Transcript) -> None:
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO transcripts (account_id, chat_id, message_id, text, model, error, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
+                text = excluded.text,
+                model = excluded.model,
+                error = excluded.error,
+                created_at = excluded.created_at
+            """,
+            (
+                transcript.account_id,
+                transcript.chat_id,
+                transcript.message_id,
+                transcript.text,
+                transcript.model,
+                transcript.error,
+                _format_iso(transcript.created_at),
+            ),
         )
