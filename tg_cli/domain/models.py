@@ -140,3 +140,20 @@ class HistoryWindow:
     chat_id: int
     oldest_loaded_id: int
     newest_loaded_id: int
+
+
+@dataclass(slots=True)
+class DateSeparator:
+    date_str: str
+
+    @property
+    def identity(self) -> str:
+        return f"date_sep_{self.date_str}"
+
+
+@dataclass(slots=True)
+class UnreadDivider:
+    @property
+    def identity(self) -> str:
+        return "unread_divider"
+

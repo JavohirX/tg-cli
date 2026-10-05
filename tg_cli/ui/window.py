@@ -61,6 +61,10 @@ class WindowedList(Widget, Generic[T]):
             self.prompt = prompt
             self.on_confirm = on_confirm
 
+    class ReachedTop(TextualMessage):
+        """Posted when user attempts to move above the top item."""
+        pass
+
     BINDINGS = [
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
@@ -196,20 +200,22 @@ class WindowedList(Widget, Generic[T]):
             return
 
         count = len(self._items)
-        new_cursor = self.cursor
+        last_valid_selectable = self.cursor
+        curr = self.cursor
         step = 1 if delta > 0 else -1
         remaining = abs(delta)
 
         while remaining > 0:
-            candidate = new_cursor + step
+            candidate = curr + step
             if not (0 <= candidate < count):
                 break
-            new_cursor = candidate
-            if self._is_selectable(new_cursor):
+            curr = candidate
+            if self._is_selectable(curr):
+                last_valid_selectable = curr
                 remaining -= 1
 
-        if new_cursor != self.cursor:
-            self.cursor = new_cursor
+        if last_valid_selectable != self.cursor:
+            self.cursor = last_valid_selectable
 
             # If anchor is active, update range selection
             if self.anchor_index is not None:
@@ -218,6 +224,8 @@ class WindowedList(Widget, Generic[T]):
             self._ensure_cursor_visible()
             self.post_message(self.CursorMoved(self.cursor, self.get_focused_item()))
             self.refresh()
+        elif delta < 0:
+            self.post_message(self.ReachedTop())
 
     def _update_range_selection(self) -> None:
         if self.anchor_index is None:
