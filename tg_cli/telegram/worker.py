@@ -12,13 +12,16 @@ import threading
 from typing import Any, Callable, Sequence
 from telethon import TelegramClient, errors
 from telethon.tl.types import User
-from tg_cli.domain.models import Account, AuthState
+from tg_cli.domain.models import Account, AuthState, Chat, Folder
 from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
+    delete_messages,
     get_accounts,
+    get_chat as repo_get_chat,
     upsert_account,
     upsert_chats,
+    upsert_folders,
     upsert_messages,
 )
 from tg_cli.telegram.map import (
@@ -158,6 +161,9 @@ class TelethonWorker(threading.Thread):
                         upsert_account(self.conn, updated_acc)
                         self.clients[acc.user_id] = client
                         logger.info(f"Connected account {acc.user_id}")
+                        self._attach_event_handlers(acc.user_id, client)
+                        asyncio.create_task(self._sync_folders(acc.user_id, client))
+                        asyncio.create_task(self._sync_dialogs(acc.user_id, client))
                         self._emit("account_connected", {"user_id": acc.user_id})
                 else:
                     # Session expired
@@ -248,6 +254,9 @@ class TelethonWorker(threading.Thread):
         account = map_telethon_user_to_account(me or user, str(final_session))
         upsert_account(self.conn, account)
         self.clients[account.user_id] = client
+        self._attach_event_handlers(account.user_id, client)
+        asyncio.create_task(self._sync_folders(account.user_id, client))
+        asyncio.create_task(self._sync_dialogs(account.user_id, client))
 
         self._login_client = None
         self._login_phone = ""
@@ -255,6 +264,107 @@ class TelethonWorker(threading.Thread):
 
         logger.info(f"User {account.user_id} successfully authenticated")
         self._emit("login_success", {"account": account})
+
+    def _attach_event_handlers(self, user_id: int, client: TelegramClient) -> None:
+        """Attach live event handlers to Telethon client for real-time updates."""
+        from telethon import events
+
+        @client.on(events.NewMessage())
+        async def on_new_message(event: events.NewMessage.Event):
+            try:
+                msg = map_telethon_message_to_domain(event.message, user_id, event.chat_id)
+                upsert_messages(self.conn, [msg])
+
+                chat = repo_get_chat(self.conn, user_id, event.chat_id)
+                if chat:
+                    chat.last_message_id = msg.message_id
+                    chat.last_date = msg.date
+                    chat.last_preview = msg.plain_text or f"[{msg.kind.value}]"
+                    if not msg.outgoing:
+                        chat.unread_count += 1
+                    upsert_chats(self.conn, [chat])
+
+                self._emit("chats_changed", {"user_id": user_id})
+                self._emit("messages_changed", {"user_id": user_id, "chat_id": event.chat_id})
+            except Exception as e:
+                logger.warning(f"Error handling live message: {type(e).__name__}")
+
+        @client.on(events.MessageEdited())
+        async def on_message_edited(event: events.MessageEdited.Event):
+            try:
+                msg = map_telethon_message_to_domain(event.message, user_id, event.chat_id)
+                upsert_messages(self.conn, [msg])
+                self._emit("messages_changed", {"user_id": user_id, "chat_id": event.chat_id})
+            except Exception as e:
+                logger.warning(f"Error handling live edit: {type(e).__name__}")
+
+        @client.on(events.MessageDeleted())
+        async def on_message_deleted(event: events.MessageDeleted.Event):
+            try:
+                deleted_ids = event.deleted_ids or []
+                if deleted_ids:
+                    chat_id = getattr(event, "chat_id", None)
+                    if chat_id:
+                        delete_messages(self.conn, user_id, chat_id, deleted_ids)
+                        self._emit("messages_changed", {"user_id": user_id, "chat_id": chat_id})
+            except Exception as e:
+                logger.warning(f"Error handling live delete: {type(e).__name__}")
+
+    async def _sync_dialogs(self, user_id: int, client: TelegramClient) -> None:
+        """Paging dialog sync without blocking UI."""
+        self._emit("status", {"message": "syncing dialogs...", "is_error": False})
+        batch: list[Chat] = []
+        try:
+            async for dialog in client.iter_dialogs(limit=None):
+                chat = map_telethon_dialog_to_chat(dialog, user_id)
+                folder_id = getattr(dialog, "folder_id", 0)
+                if folder_id:
+                    chat.folder_ids.add(folder_id)
+                batch.append(chat)
+
+                if len(batch) >= 100:
+                    upsert_chats(self.conn, batch)
+                    self._emit("chats_changed", {"user_id": user_id, "count": len(batch)})
+                    batch.clear()
+                    await asyncio.sleep(0.01)
+
+            if batch:
+                upsert_chats(self.conn, batch)
+                self._emit("chats_changed", {"user_id": user_id, "count": len(batch)})
+
+            self._emit("status", {"message": "ready", "is_error": False})
+        except errors.FloodWaitError as e:
+            self._emit("status", {"message": f"rate limited {e.seconds}s", "is_error": True})
+        except Exception as e:
+            logger.warning(f"Error syncing dialogs for {user_id}: {type(e).__name__}")
+            self._emit("status", {"message": f"sync error: {type(e).__name__}", "is_error": True})
+
+    async def _sync_folders(self, user_id: int, client: TelegramClient) -> None:
+        """Fetch Telegram folder tabs."""
+        try:
+            from telethon.tl.functions.messages import GetDialogFiltersRequest
+            from telethon.tl.types import DialogFilter, DialogFilterChatlist
+
+            filters = await client(GetDialogFiltersRequest())
+            domain_folders: list[Folder] = []
+            for pos, f in enumerate(filters):
+                if isinstance(f, (DialogFilter, DialogFilterChatlist)):
+                    title = getattr(f, "title", f"Folder {f.id}")
+                    if hasattr(title, "text"):
+                        title = title.text
+                    domain_folders.append(
+                        Folder(
+                            account_id=user_id,
+                            folder_id=f.id,
+                            title=str(title),
+                            position=pos + 1,
+                        )
+                    )
+            if domain_folders:
+                upsert_folders(self.conn, domain_folders)
+                self._emit("folders_changed", {"user_id": user_id})
+        except Exception as e:
+            logger.debug(f"Could not fetch dialog filters: {type(e).__name__}")
 
     async def _cleanup_login_client(self) -> None:
         if self._login_client:

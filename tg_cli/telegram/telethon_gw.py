@@ -58,12 +58,31 @@ class TelethonGateway:
         self.db_path = db_path
         self.conn = init_db(db_path)
         self.event_callback = event_callback or (lambda evt, data: None)
+        self._listeners: list[Callable[[str, dict[str, Any]], None]] = []
+        if event_callback:
+            self._listeners.append(event_callback)
+
         self.worker = TelethonWorker(
             event_callback=self._on_worker_event,
             db_path=db_path,
         )
         self._temp_msg_counter = -1
         self._lock = threading.Lock()
+
+    def register_listener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def unregister_listener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _on_worker_event(self, event_type: str, data: dict[str, Any]) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(event_type, data)
+            except Exception:
+                pass
 
     def start(self) -> None:
         """Start worker thread and connect existing accounts."""

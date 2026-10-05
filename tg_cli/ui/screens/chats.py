@@ -117,6 +117,37 @@ class ChatsScreen(Screen):
         self.chat_list.focus()
         self.set_interval(1.0, self._tick_undo)
 
+        if hasattr(self.gateway, "register_listener"):
+            self.gateway.register_listener(self._on_gateway_event)
+
+    def on_unmount(self) -> None:
+        if hasattr(self.gateway, "unregister_listener"):
+            self.gateway.unregister_listener(self._on_gateway_event)
+
+    def _on_gateway_event(self, event_type: str, data: dict[str, Any]) -> None:
+        def handle():
+            if event_type == "chats_changed":
+                if data.get("user_id") == self.account.user_id:
+                    self.refresh_chats(initial=False)
+            elif event_type == "folders_changed":
+                if data.get("user_id") == self.account.user_id:
+                    self.folders = self.gateway.get_folders(self.account.user_id)
+                    self.folder_strip.set_folders(self.folders, active_folder_id=self.current_folder_id)
+            elif event_type == "status":
+                msg = data.get("message", "")
+                is_err = data.get("is_error", False)
+                self.status_bar.set_status(msg, is_error=is_err)
+
+        import threading
+
+        try:
+            if threading.current_thread() is threading.main_thread():
+                handle()
+            else:
+                self.app.call_from_thread(handle)
+        except Exception:
+            pass
+
     def _render_row(
         self, chat: Chat, width: int, is_cursor: bool, is_selected: bool
     ) -> Text:
