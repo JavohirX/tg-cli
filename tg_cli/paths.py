@@ -20,6 +20,9 @@ def get_app_dir() -> Path:
     return base
 
 
+get_app_data_dir = get_app_dir
+
+
 def get_db_path() -> Path:
     """Return path to SQLite database."""
     return get_app_dir() / "app.db"

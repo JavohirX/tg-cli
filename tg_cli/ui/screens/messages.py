@@ -176,6 +176,10 @@ class MessagesScreen(Screen):
             if event_type == "messages_changed":
                 if data.get("chat_id") == self.chat.chat_id:
                     self._handle_live_message_event()
+            elif event_type == "status":
+                msg = data.get("message", "")
+                is_err = data.get("is_error", False)
+                self.status_bar.set_status(msg, is_error=is_err)
 
         try:
             if threading.current_thread() is threading.main_thread():
@@ -270,11 +274,16 @@ class MessagesScreen(Screen):
         initial: bool = False,
         jump_to_end: bool = False,
     ) -> None:
-        messages = self.gateway.get_messages(
-            account_id=self.account.user_id,
-            chat_id=self.chat.chat_id,
-            limit=50,
-        )
+        try:
+            messages = self.gateway.get_messages(
+                account_id=self.account.user_id,
+                chat_id=self.chat.chat_id,
+                limit=50,
+            )
+        except Exception as e:
+            self.status_bar.set_status(f"Chat unavailable: {e}", is_error=True)
+            return
+
         self._all_messages = messages
         items = self._build_stream_items(messages)
         self.message_list.set_items(items, keep_cursor=not initial and not jump_to_end)

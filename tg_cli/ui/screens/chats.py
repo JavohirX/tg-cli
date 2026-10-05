@@ -212,11 +212,18 @@ class ChatsScreen(Screen):
             self.refresh_chats(initial=True)
             return
 
+        if getattr(chat, "unavailable", False):
+            self.status_bar.set_status(f"Chat '{chat.title}' is unavailable.", is_error=True)
+            return
+
         from tg_cli.ui.screens.messages import MessagesScreen
-        self.app.push_screen(
-            MessagesScreen(gateway=self.gateway, account=self.account, chat=chat),
-            callback=lambda _: self.refresh_chats(initial=False),
-        )
+        try:
+            self.app.push_screen(
+                MessagesScreen(gateway=self.gateway, account=self.account, chat=chat),
+                callback=lambda _: self.refresh_chats(initial=False),
+            )
+        except Exception as e:
+            self.status_bar.set_status(f"Cannot open chat: {e}", is_error=True)
 
     def action_open_focused(self) -> None:
         focused = self.chat_list.get_focused_item()

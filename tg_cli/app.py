@@ -26,12 +26,24 @@ class TelegramCLIApp(App[None]):
         Binding("ctrl+c", "handle_ctrl_c", "Cancel/Quit", show=False, priority=True),
     ]
 
-    def __init__(self, gateway: Gateway | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        gateway: Gateway | None = None,
+        db_error: tuple[object, str] | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.gateway = gateway or FakeGateway()
+        self.db_error = db_error
         self._last_ctrl_c_time: float = 0.0
 
     def on_mount(self) -> None:
+        if self.db_error is not None:
+            from tg_cli.ui.screens.db_error import DatabaseErrorScreen
+            path, err = self.db_error
+            self.push_screen(DatabaseErrorScreen(db_path=str(path), error_message=err))
+            return
+
         accounts = self.gateway.get_accounts()
         if len(accounts) == 1:
             # Single account: open chat list directly, with accounts screen behind it

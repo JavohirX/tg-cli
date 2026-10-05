@@ -84,6 +84,7 @@ class Chat:
     last_date: datetime | None = None
     last_preview: str = ""
     folder_ids: set[int] = field(default_factory=set)
+    unavailable: bool = False
 
     @property
     def identity(self) -> tuple[int, int]:
