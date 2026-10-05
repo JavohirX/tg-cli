@@ -13,6 +13,7 @@ from tg_cli.domain.models import (
     Account,
     AuthState,
     Chat,
+    Draft,
     Folder,
     Message,
     MessageKind,
@@ -22,15 +23,18 @@ from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
     archive_chats as repo_archive_chats,
+    clear_draft as repo_clear_draft,
     delete_chats as repo_delete_chats,
     delete_messages as repo_delete_messages,
     get_accounts as repo_get_accounts,
     get_chat as repo_get_chat,
     get_chats as repo_get_chats,
+    get_draft as repo_get_draft,
     get_folders as repo_get_folders,
     get_messages as repo_get_messages,
     mark_chats_read as repo_mark_chats_read,
     mute_chats as repo_mute_chats,
+    save_draft as repo_save_draft,
     upsert_account as repo_upsert_account,
     upsert_messages as repo_upsert_messages,
 )
@@ -242,3 +246,20 @@ class TelethonGateway:
                 pass
         from tg_cli.store.repo import delete_account
         delete_account(self.conn, user_id)
+
+    def get_draft(self, account_id: int, chat_id: int) -> Draft | None:
+        return repo_get_draft(self.conn, account_id, chat_id)
+
+    def save_draft(self, draft: Draft) -> None:
+        repo_save_draft(self.conn, draft)
+
+    def clear_draft(self, account_id: int, chat_id: int) -> None:
+        repo_clear_draft(self.conn, account_id, chat_id)
+
+    def retry_failed_message(self, account_id: int, chat_id: int, message_id: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE messages SET send_state = ? WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                (SendState.SENT.value, account_id, chat_id, message_id),
+            )
+

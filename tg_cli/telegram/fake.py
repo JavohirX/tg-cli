@@ -11,6 +11,7 @@ from tg_cli.domain.models import (
     AuthState,
     Chat,
     ChatKind,
+    Draft,
     Folder,
     Message,
     MessageKind,
@@ -61,6 +62,7 @@ class FakeGateway:
 
         self.chats: dict[int, dict[int, Chat]] = {acc.user_id: {} for acc in self.accounts}
         self.messages: dict[tuple[int, int], list[Message]] = {}
+        self.drafts: dict[tuple[int, int], Draft] = {}
 
         self._seed_data(chat_count)
 
@@ -451,3 +453,25 @@ class FakeGateway:
     ) -> None:
         for cid in chat_ids:
             self.chats.get(account_id, {}).pop(cid, None)
+
+    def get_draft(self, account_id: int, chat_id: int) -> Draft | None:
+        return self.drafts.get((account_id, chat_id))
+
+    def save_draft(self, draft: Draft) -> None:
+        self.drafts[(draft.account_id, draft.chat_id)] = draft
+        if draft.chat_id in self.chats.get(draft.account_id, {}):
+            self.chats[draft.account_id][draft.chat_id].last_preview = f"Draft: {draft.text}"
+
+    def clear_draft(self, account_id: int, chat_id: int) -> None:
+        self.drafts.pop((account_id, chat_id), None)
+        chat = self.chats.get(account_id, {}).get(chat_id)
+        if chat:
+            msgs = self.messages.get((account_id, chat_id), [])
+            chat.last_preview = msgs[-1].plain_text if msgs else ""
+
+    def retry_failed_message(self, account_id: int, chat_id: int, message_id: int) -> None:
+        msgs = self.messages.get((account_id, chat_id), [])
+        for m in msgs:
+            if m.message_id == message_id:
+                m.send_state = SendState.SENT
+                return

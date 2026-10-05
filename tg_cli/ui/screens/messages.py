@@ -20,7 +20,9 @@ from tg_cli.domain.models import (
     Account,
     Chat,
     DateSeparator,
+    Draft,
     Message,
+    SendState,
     UnreadDivider,
 )
 from tg_cli.domain.render import format_date_separator, render_message
@@ -117,7 +119,34 @@ class MessagesScreen(Screen):
         # Mark chat as read initially
         self.gateway.mark_chats_read(self.account.user_id, [self.chat.chat_id], read=True)
 
+        # Restore draft if exists
+        draft = self.gateway.get_draft(self.account.user_id, self.chat.chat_id)
+        if draft:
+            self.composer.text = draft.text
+            if draft.edit_message_id is not None:
+                self.composer.set_edit_context(draft.edit_message_id, draft.text)
+            elif draft.reply_to_id is not None:
+                reply_msg = next((m for m in self._all_messages if m.message_id == draft.reply_to_id), None)
+                sender = reply_msg.sender_name if reply_msg else f"#{draft.reply_to_id}"
+                prev = (reply_msg.plain_text or "") if reply_msg else ""
+                self.composer.set_reply_context(draft.reply_to_id, sender, prev)
+
+    def _persist_draft(self) -> None:
+        text = self.composer.text
+        if text.strip():
+            draft = Draft(
+                account_id=self.account.user_id,
+                chat_id=self.chat.chat_id,
+                text=text,
+                reply_to_id=self.composer.reply_to_id,
+                edit_message_id=self.composer.edit_message_id,
+            )
+            self.gateway.save_draft(draft)
+        else:
+            self.gateway.clear_draft(self.account.user_id, self.chat.chat_id)
+
     def on_unmount(self) -> None:
+        self._persist_draft()
         if hasattr(self.gateway, "unregister_listener"):
             self.gateway.unregister_listener(self._on_gateway_event)
 
@@ -314,6 +343,7 @@ class MessagesScreen(Screen):
         self.status_bar.set_status(event.error, is_error=True)
 
     def on_composer_message_submitted(self, event: Composer.MessageSubmitted) -> None:
+        self.gateway.clear_draft(self.account.user_id, self.chat.chat_id)
         if event.edit_message_id is not None:
             self.gateway.edit_message(
                 account_id=self.account.user_id,
@@ -332,6 +362,16 @@ class MessagesScreen(Screen):
             self.status_bar.set_status(f"Sent message #{new_msg.message_id}")
 
         self.refresh_messages(initial=False, jump_to_end=True)
+
+    def on_windowed_list_item_activated(self, event: WindowedList.ItemActivated) -> None:
+        if isinstance(event.item, Message) and event.item.send_state == SendState.FAILED:
+            self.gateway.retry_failed_message(
+                self.account.user_id,
+                self.chat.chat_id,
+                event.item.message_id,
+            )
+            self.status_bar.set_status(f"Retrying message #{event.item.message_id}...")
+            self.refresh_messages(initial=False)
 
     def action_reply_focused(self) -> None:
         if self.is_write_mode:

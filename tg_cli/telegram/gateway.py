@@ -5,7 +5,7 @@ Screens never import Telethon; they interact only with this interface.
 from __future__ import annotations
 
 from typing import Protocol, Sequence
-from tg_cli.domain.models import Account, Chat, Folder, Message
+from tg_cli.domain.models import Account, Chat, Draft, Folder, Message
 
 
 class Gateway(Protocol):
@@ -108,4 +108,20 @@ class Gateway(Protocol):
         chat_ids: Sequence[int],
     ) -> None:
         """Delete chats for current user."""
+        ...
+
+    def get_draft(self, account_id: int, chat_id: int) -> Draft | None:
+        """Retrieve stored draft for a chat."""
+        ...
+
+    def save_draft(self, draft: Draft) -> None:
+        """Save draft text and context for a chat."""
+        ...
+
+    def clear_draft(self, account_id: int, chat_id: int) -> None:
+        """Clear draft for a chat."""
+        ...
+
+    def retry_failed_message(self, account_id: int, chat_id: int, message_id: int) -> None:
+        """Retry sending a failed message."""
         ...

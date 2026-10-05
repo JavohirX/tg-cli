@@ -120,8 +120,12 @@ def render_chat_row(
     line.append(title_padding)
 
     # Preview
-    preview_style = "dim italic" if chat.muted else "dim"
-    line.append(preview_clean, style=preview_style)
+    if preview_clean.startswith("Draft: "):
+        line.append("Draft: ", style="bold red")
+        line.append(preview_clean[7:], style="red")
+    else:
+        preview_style = "dim italic" if chat.muted else "dim"
+        line.append(preview_clean, style=preview_style)
 
     # Right-aligned time and unread count
     total_so_far = cell_len(line.plain)

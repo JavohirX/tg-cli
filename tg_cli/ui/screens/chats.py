@@ -178,6 +178,11 @@ class ChatsScreen(Screen):
             )
             items.append(archive_row)
 
+        for c in raw_chats:
+            draft = self.gateway.get_draft(self.account.user_id, c.chat_id)
+            if draft and draft.text.strip():
+                c.last_preview = f"Draft: {draft.text}"
+
         items.extend(raw_chats)
         self.chat_list.set_items(items, keep_cursor=not initial)
 
@@ -204,7 +209,8 @@ class ChatsScreen(Screen):
 
         from tg_cli.ui.screens.messages import MessagesScreen
         self.app.push_screen(
-            MessagesScreen(gateway=self.gateway, account=self.account, chat=chat)
+            MessagesScreen(gateway=self.gateway, account=self.account, chat=chat),
+            callback=lambda _: self.refresh_chats(initial=False),
         )
 
     def action_open_focused(self) -> None:
