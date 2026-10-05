@@ -42,6 +42,7 @@ class Gateway(Protocol):
         chat_id: int,
         limit: int = 50,
         before_id: int | None = None,
+        search_query: str = "",
     ) -> list[Message]:
         """Return messages for chat, oldest to newest or paged before an id."""
         ...

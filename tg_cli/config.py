@@ -71,3 +71,17 @@ def save_config(
 def has_api_credentials() -> bool:
     cfg = load_config()
     return bool(cfg.get("api_id") and cfg.get("api_hash"))
+
+
+def has_seen_help() -> bool:
+    cfg = load_config()
+    return bool(cfg.get("has_seen_help", False))
+
+
+def mark_help_seen() -> None:
+    path = get_config_path()
+    cfg = load_config()
+    cfg["has_seen_help"] = True
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)

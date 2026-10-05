@@ -184,4 +184,30 @@ class AccountsScreen(Screen):
 
     def action_show_palette(self) -> None:
         from tg_cli.ui.screens.palette import CommandPalette
-        self.app.push_screen(CommandPalette(context="accounts"))
+        self.app.push_screen(
+            CommandPalette(context="accounts"),
+            callback=self._handle_palette_command,
+        )
+
+    def _handle_palette_command(self, cmd: Any) -> None:
+        if cmd is None:
+            return
+
+        def execute() -> None:
+            match cmd.id:
+                case "add_account":
+                    self.action_add_account()
+                case "remove_account":
+                    self.action_remove_account()
+                case "open_account":
+                    self.action_open_selected()
+                case "help":
+                    self.action_show_help()
+
+        if getattr(cmd, "destructive", False):
+            self._request_confirm(
+                f"Run '{cmd.title}'? (y/n)",
+                execute,
+            )
+        else:
+            execute()

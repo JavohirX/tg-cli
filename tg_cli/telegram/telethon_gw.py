@@ -136,8 +136,9 @@ class TelethonGateway:
         chat_id: int,
         limit: int = 50,
         before_id: int | None = None,
+        search_query: str = "",
     ) -> list[Message]:
-        return repo_get_messages(self.conn, account_id, chat_id, limit, before_id)
+        return repo_get_messages(self.conn, account_id, chat_id, limit, before_id, search_query)
 
     def send_message(
         self,

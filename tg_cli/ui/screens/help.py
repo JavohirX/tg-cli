@@ -55,6 +55,13 @@ class HelpScreen(ModalScreen[None]):
                 yield Static(self._build_help_table())
             yield Static("Press Esc or ? to return", id="help-footer")
 
+    def on_mount(self) -> None:
+        from tg_cli.config import mark_help_seen
+        try:
+            mark_help_seen()
+        except Exception:
+            pass
+
     def _build_help_table(self) -> Table:
         table = Table(
             title=f"Keyboard Shortcuts ({self.context.title()} View)",

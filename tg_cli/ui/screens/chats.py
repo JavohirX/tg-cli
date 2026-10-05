@@ -121,6 +121,10 @@ class ChatsScreen(Screen):
         if hasattr(self.gateway, "register_listener"):
             self.gateway.register_listener(self._on_gateway_event)
 
+        from tg_cli.config import has_seen_help
+        if not has_seen_help():
+            self.status_bar.set_status("Press ? for keys")
+
     def on_unmount(self) -> None:
         if hasattr(self.gateway, "unregister_listener"):
             self.gateway.unregister_listener(self._on_gateway_event)
@@ -495,4 +499,54 @@ class ChatsScreen(Screen):
 
     def action_show_palette(self) -> None:
         from tg_cli.ui.screens.palette import CommandPalette
-        self.app.push_screen(CommandPalette(context="chats"))
+        self.app.push_screen(
+            CommandPalette(context="chats"),
+            callback=self._handle_palette_command,
+        )
+
+    def _handle_palette_command(self, cmd: Any) -> None:
+        if cmd is None:
+            return
+
+        def execute() -> None:
+            match cmd.id:
+                case "open_chat":
+                    self.action_open_focused()
+                case "archive_chat":
+                    self.action_toggle_archive()
+                case "mute_chat":
+                    self.action_toggle_mute()
+                case "mark_read":
+                    self.action_mark_read()
+                case "mark_unread":
+                    self.action_mark_unread()
+                case "delete_chat":
+                    self.action_delete_chat()
+                case "undo":
+                    self.action_undo_action()
+                case "filter":
+                    self.action_start_filter()
+                case "account_next":
+                    self.action_next_account()
+                case "account_prev":
+                    self.action_prev_account()
+                case "folder_prev":
+                    self.action_prev_folder()
+                case "folder_next":
+                    self.action_next_folder()
+                case "help":
+                    self.action_show_help()
+                case "select_all":
+                    self.chat_list.action_select_all()
+                case "toggle_select":
+                    self.chat_list.action_toggle_select()
+                case "clear_selection":
+                    self.chat_list.clear_selection()
+
+        if getattr(cmd, "destructive", False):
+            self._request_confirm(
+                f"Run '{cmd.title}'? (y/n)",
+                execute,
+            )
+        else:
+            execute()

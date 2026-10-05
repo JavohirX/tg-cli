@@ -332,6 +332,7 @@ class FakeGateway:
         chat_id: int,
         limit: int = 50,
         before_id: int | None = None,
+        search_query: str = "",
     ) -> list[Message]:
         msgs = self.messages.get((account_id, chat_id), [])
         if not msgs:
@@ -354,6 +355,12 @@ class FakeGateway:
             self.messages[(account_id, chat_id)] = msgs
 
         filtered = [m for m in msgs if before_id is None or m.message_id < before_id]
+        if search_query:
+            q = search_query.lower()
+            filtered = [
+                m for m in filtered
+                if q in m.plain_text.lower() or q in m.sender_name.lower()
+            ]
         return filtered[-limit:]
 
     def send_message(

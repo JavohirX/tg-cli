@@ -288,12 +288,17 @@ def get_messages(
     chat_id: int,
     limit: int = 50,
     before_id: int | None = None,
+    search_query: str = "",
 ) -> list[Message]:
     params: list[object] = [account_id, chat_id]
     sql = "SELECT * FROM messages WHERE account_id = ? AND chat_id = ?"
     if before_id is not None:
         sql += " AND message_id < ?"
         params.append(before_id)
+    if search_query:
+        sql += " AND (plain_text LIKE ? OR sender_name LIKE ?)"
+        params.append(f"%{search_query}%")
+        params.append(f"%{search_query}%")
     sql += " ORDER BY message_id DESC LIMIT ?"
     params.append(limit)
 

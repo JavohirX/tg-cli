@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import threading
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from rich.console import Group, RenderableType
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
+from textual.events import Key
 from textual.screen import Screen
-from textual.widgets import Static
+from textual.widgets import Input, Static
 from tg_cli.domain.models import (
     Account,
     Chat,
@@ -47,6 +48,17 @@ class MessagesScreen(Screen):
         color: $text;
         padding: 0 1;
     }
+    #filter-container {
+        height: 1;
+        width: 100%;
+        display: none;
+    }
+    #filter-input {
+        height: 1;
+        border: none;
+        padding: 0 1;
+        background: $surface;
+    }
     #message-list-container {
         height: 1fr;
     }
@@ -55,6 +67,7 @@ class MessagesScreen(Screen):
     BINDINGS = [
         Binding("tab", "toggle_focus", "Toggle List/Write", show=False),
         Binding("escape", "handle_escape", "Back/Defocus", show=False),
+        Binding("/", "start_search", "Search", show=False),
         Binding("r", "reply_focused", "Reply", show=False),
         Binding("e", "edit_focused", "Edit", show=False),
         Binding("d", "delete_focused", "Delete", show=False),
@@ -84,11 +97,14 @@ class MessagesScreen(Screen):
         self._all_messages: list[Message] = []
         self._is_loading_older: bool = False
         self._unseen_count: int = 0
+        self.search_query: str = ""
+        self._pending_confirm: tuple[str, Callable[[], None]] | None = None
 
         self.chat_header = Static("", id="chat-header")
         self.status_bar = StatusBar()
         self.footer_bar = FooterBar(context="messages", is_write_mode=False)
         self.composer = Composer(id="message-composer")
+        self.filter_input = Input(placeholder="Search messages...", id="filter-input")
 
         self.message_list = WindowedList[Any](
             items=[],
@@ -101,6 +117,8 @@ class MessagesScreen(Screen):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield self.chat_header
+            with Container(id="filter-container"):
+                yield self.filter_input
             with Container(id="message-list-container"):
                 yield self.message_list
             yield self.composer
@@ -455,19 +473,106 @@ class MessagesScreen(Screen):
                 self.expanded_message_ids.add(mid)
             self.message_list.refresh()
 
+    def action_start_search(self) -> None:
+        if self.is_write_mode:
+            return
+        container = self.query_one("#filter-container")
+        container.display = True
+        self.filter_input.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "filter-input":
+            self.search_query = event.value.strip()
+            self._apply_search_filter(jump=False)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "filter-input":
+            query = event.value.strip()
+            if query:
+                # Query gateway for messages outside window
+                older = self.gateway.get_messages(
+                    account_id=self.account.user_id,
+                    chat_id=self.chat.chat_id,
+                    limit=50,
+                    search_query=query,
+                )
+                if older:
+                    existing_ids = {m.message_id for m in self._all_messages}
+                    new_msgs = [m for m in older if m.message_id not in existing_ids]
+                    if new_msgs:
+                        self._all_messages = sorted(new_msgs + self._all_messages, key=lambda m: m.message_id)
+            self._apply_search_filter(jump=True)
+            self.message_list.focus()
+
+    def _apply_search_filter(self, jump: bool = False) -> None:
+        if not self.search_query:
+            items = self._build_stream_items(self._all_messages)
+            self.message_list.set_items(items, keep_cursor=True)
+            return
+
+        q = self.search_query.lower()
+        matched = [
+            m for m in self._all_messages
+            if q in m.plain_text.lower() or q in m.sender_name.lower()
+        ]
+        items = self._build_stream_items(matched)
+        self.message_list.set_items(items, keep_cursor=not jump)
+        if jump and items:
+            self.message_list.cursor = 0
+            self.message_list._adjust_cursor_to_selectable(1)
+            self.message_list._ensure_cursor_visible()
+            self.status_bar.set_status(f"Found {len(matched)} match(es) for '{self.search_query}'")
+        elif not matched:
+            self.status_bar.set_status(f"No messages matching '{self.search_query}'")
+
+    def _request_confirm(self, prompt: str, on_confirm: Callable[[], None]) -> None:
+        self._pending_confirm = (prompt, on_confirm)
+        self.status_bar.set_prompt(prompt)
+
+    def on_key(self, event: Key) -> None:
+        if self._pending_confirm is not None:
+            prompt, on_confirm = self._pending_confirm
+            if event.character in ("y", "Y"):
+                self._pending_confirm = None
+                self.status_bar.set_prompt(None)
+                on_confirm()
+            elif event.character in ("n", "N") or event.key == "escape":
+                self._pending_confirm = None
+                self.status_bar.set_prompt(None)
+                self.status_bar.set_status("Action cancelled.")
+            event.prevent_default()
+            event.stop()
+            return
+
     def action_handle_escape(self) -> None:
         # Esc stack rule:
-        # 1. If in write mode, defocus composer or clear reply/edit
+        # 1. Confirmation prompt active
+        if self._pending_confirm is not None:
+            self._pending_confirm = None
+            self.status_bar.set_prompt(None)
+            return
+
+        # 2. If in write mode, defocus composer or clear reply/edit
         if self.is_write_mode:
             if not self.composer.clear_context():
                 self._set_focus_mode(is_write=False)
             return
 
-        # 2. If selection active in message list, clear selection
+        # 3. Search active
+        container = self.query_one("#filter-container")
+        if container.display:
+            container.display = False
+            self.search_query = ""
+            self.filter_input.value = ""
+            self._apply_search_filter(jump=False)
+            self.message_list.focus()
+            return
+
+        # 4. If selection active in message list, clear selection
         if self.message_list.clear_selection():
             return
 
-        # 3. Pop back to chat list
+        # 5. Pop back to chat list
         self.app.pop_screen()
 
     def action_show_help(self) -> None:
@@ -476,4 +581,42 @@ class MessagesScreen(Screen):
 
     def action_show_palette(self) -> None:
         from tg_cli.ui.screens.palette import CommandPalette
-        self.app.push_screen(CommandPalette(context="messages"))
+        self.app.push_screen(
+            CommandPalette(context="messages"),
+            callback=self._handle_palette_command,
+        )
+
+    def _handle_palette_command(self, cmd: Any) -> None:
+        if cmd is None:
+            return
+
+        def execute() -> None:
+            match cmd.id:
+                case "reply_message":
+                    self.action_reply_focused()
+                case "edit_message":
+                    self.action_edit_focused()
+                case "delete_message":
+                    self.action_delete_focused()
+                case "transcribe_voice":
+                    self.action_transcribe_focused()
+                case "retranscribe_voice":
+                    self.action_retranscribe_focused()
+                case "yank_text":
+                    self.action_yank_focused()
+                case "toggle_expand":
+                    self.action_toggle_expand()
+                case "filter":
+                    self.action_start_search()
+                case "focus_toggle":
+                    self.action_toggle_focus()
+                case "help":
+                    self.action_show_help()
+
+        if getattr(cmd, "destructive", False):
+            self._request_confirm(
+                f"Run '{cmd.title}'? (y/n)",
+                execute,
+            )
+        else:
+            execute()
