@@ -265,6 +265,14 @@ class FakeGateway:
     def get_accounts(self) -> list[Account]:
         return list(self.accounts)
 
+    def add_account(self, account: Account) -> None:
+        self.accounts.append(account)
+        self.chats.setdefault(account.user_id, {})
+
+    def remove_account(self, user_id: int) -> None:
+        self.accounts = [a for a in self.accounts if a.user_id != user_id]
+        self.chats.pop(user_id, None)
+
     def get_folders(self, account_id: int) -> list[Folder]:
         return list(self.folders.get(account_id, []))
 

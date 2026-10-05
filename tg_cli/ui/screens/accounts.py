@@ -4,12 +4,13 @@ Allows selecting an account to view, adding new accounts, or removing sessions.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from rich.console import RenderableType
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
+from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Static
 from tg_cli.domain.models import Account, AuthState
@@ -54,6 +55,7 @@ class AccountsScreen(Screen):
     def __init__(self, gateway: Gateway, **kwargs) -> None:
         super().__init__(**kwargs)
         self.gateway = gateway
+        self._pending_confirm: tuple[str, Callable[[], None]] | None = None
         self.accounts_list = WindowedList[Account](
             items=[],
             renderer=self._render_account_row,
@@ -109,22 +111,71 @@ class AccountsScreen(Screen):
 
     def on_windowed_list_item_activated(self, event: WindowedList.ItemActivated) -> None:
         account: Account = event.item
+        self._open_account(account)
+
+    def _open_account(self, account: Account) -> None:
+        if account.auth_state == AuthState.EXPIRED:
+            self.status_bar.set_status(f"Session for {account.label} expired. Please re-authenticate.", is_error=True)
+            self.action_add_account()
+            return
         self.app.open_account(account)
 
     def action_open_selected(self) -> None:
         item = self.accounts_list.get_focused_item()
         if item is not None:
-            self.app.open_account(item)
+            self._open_account(item)
 
     def action_add_account(self) -> None:
-        self.status_bar.set_status("Account addition is enabled in Phase 1.")
+        from tg_cli.ui.screens.login import LoginScreen
+
+        def on_login_done(success: bool) -> None:
+            if success:
+                self.refresh_accounts()
+                self.status_bar.set_status("Account authenticated successfully.")
+            self.accounts_list.focus()
+
+        self.app.push_screen(LoginScreen(gateway=self.gateway), on_login_done)
 
     def action_remove_account(self) -> None:
         item = self.accounts_list.get_focused_item()
-        if item is not None:
-            self.status_bar.set_status(f"Removal of {item.label} requested (destructive action).")
+        if item is None:
+            return
+
+        def do_remove() -> None:
+            if hasattr(self.gateway, "remove_account"):
+                self.gateway.remove_account(item.user_id)
+            self.refresh_accounts()
+            self.status_bar.set_status(f"Removed account {item.label}.")
+
+        self._request_confirm(f"Remove account {item.label}? (y/n)", do_remove)
+
+    def _request_confirm(self, prompt: str, on_confirm: Callable[[], None]) -> None:
+        self._pending_confirm = (prompt, on_confirm)
+        self.status_bar.set_prompt(prompt)
+
+    def on_key(self, event: Key) -> None:
+        if self._pending_confirm is not None:
+            prompt, on_confirm = self._pending_confirm
+            if event.character in ("y", "Y"):
+                self._pending_confirm = None
+                self.status_bar.set_prompt(None)
+                on_confirm()
+                event.prevent_default()
+                event.stop()
+                return
+            elif event.character in ("n", "N") or event.key == "escape":
+                self._pending_confirm = None
+                self.status_bar.set_prompt(None)
+                self.status_bar.set_status("Removal cancelled.")
+                event.prevent_default()
+                event.stop()
+                return
 
     def action_exit_app(self) -> None:
+        if self._pending_confirm is not None:
+            self._pending_confirm = None
+            self.status_bar.set_prompt(None)
+            return
         self.app.exit()
 
     def action_show_help(self) -> None:

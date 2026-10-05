@@ -15,6 +15,10 @@ class Gateway(Protocol):
         """Return list of authenticated accounts."""
         ...
 
+    def remove_account(self, user_id: int) -> None:
+        """Remove account session and credentials."""
+        ...
+
     def get_folders(self, account_id: int) -> list[Folder]:
         """Return folders configured for account."""
         ...
