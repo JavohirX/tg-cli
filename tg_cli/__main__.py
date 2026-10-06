@@ -27,7 +27,34 @@ def setup_logging(debug: bool = False) -> None:
     root_logger.addHandler(file_handler)
 
 
+def setup_windows_console() -> None:
+    """Ensure UTF-8 code page and disable QuickEdit freeze in Windows cmd.exe / conhost."""
+    import sys
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        # Set UTF-8 code page (CP_UTF8 = 65001)
+        kernel32.SetConsoleOutputCP(65001)
+        kernel32.SetConsoleCP(65001)
+
+        # Disable QuickEdit mode to prevent process freezing on mouse click in cmd.exe
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        STD_INPUT_HANDLE = -10
+        h_in = kernel32.GetStdHandle(STD_INPUT_HANDLE)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(h_in, ctypes.byref(mode)):
+            new_mode = (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS
+            kernel32.SetConsoleMode(h_in, new_mode)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    setup_windows_console()
+
     parser = argparse.ArgumentParser(
         description="Keyboard-first Telegram client for Windows Terminal"
     )
