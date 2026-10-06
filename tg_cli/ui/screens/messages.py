@@ -115,6 +115,7 @@ class MessagesScreen(Screen):
             id_fn=lambda item: item.identity,
             is_selectable_fn=lambda item: isinstance(item, Message),
             id="message-window-list",
+            enable_digit_motion=False,
         )
 
     def compose(self) -> ComposeResult:
@@ -620,6 +621,24 @@ class MessagesScreen(Screen):
             event.stop()
             return
 
+        if not self.is_write_mode:
+            container = self.query_one("#filter-container")
+            if not container.display:
+                key_char = event.character or event.key
+                if key_char and key_char in "123456789":
+                    idx = int(key_char) - 1
+                    accounts = self.gateway.get_accounts()
+                    if 0 <= idx < len(accounts):
+                        target_acc = accounts[idx]
+                        self.app.pop_screen()
+                        if hasattr(self.app.screen, "action_switch_account_index"):
+                            self.app.screen.action_switch_account_index(idx)
+                        elif hasattr(self.app, "open_account"):
+                            self.app.open_account(target_acc)
+                        event.prevent_default()
+                        event.stop()
+                        return
+
     def action_handle_escape(self) -> None:
         # Esc stack rule:
         # 1. Confirmation prompt active
@@ -686,6 +705,16 @@ class MessagesScreen(Screen):
                     self.action_start_search()
                 case "focus_toggle":
                     self.action_toggle_focus()
+                case "toggle_proxy":
+                    from tg_cli.config import get_proxy_config, probe_proxy_latency, toggle_proxy
+                    new_state = toggle_proxy()
+                    if new_state:
+                        cfg = get_proxy_config()
+                        lat = probe_proxy_latency(cfg)
+                        lat_str = f" ({lat}ms)" if lat is not None else ""
+                        self.status_bar.set_toast(f"Proxy enabled: {cfg.get('type')} {cfg.get('addr')}:{cfg.get('port')}{lat_str}")
+                    else:
+                        self.status_bar.set_toast("Proxy disabled.")
                 case "help":
                     self.action_show_help()
 

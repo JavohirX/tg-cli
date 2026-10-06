@@ -7,8 +7,20 @@ from __future__ import annotations
 
 import json
 import os
+import socket
+import time
 from typing import Any
 from tg_cli.paths import get_config_path
+
+DEFAULT_PROXY = {
+    "enabled": False,
+    "type": "socks5",  # "socks5", "http", "mtproto"
+    "addr": "127.0.0.1",
+    "port": 1080,
+    "username": "",
+    "password": "",
+    "secret": "",
+}
 
 
 def load_config() -> dict[str, Any]:
@@ -18,6 +30,7 @@ def load_config() -> dict[str, Any]:
         "api_hash": "",
         "gemini_api_key": "",
         "gemini_model": "gemini-1.5-flash",
+        "proxy": dict(DEFAULT_PROXY),
     }
 
     path = get_config_path()
@@ -26,6 +39,10 @@ def load_config() -> dict[str, Any]:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
+                    if "proxy" in data and isinstance(data["proxy"], dict):
+                        p = dict(DEFAULT_PROXY)
+                        p.update(data["proxy"])
+                        data["proxy"] = p
                     config.update(data)
         except Exception:
             pass
@@ -46,6 +63,18 @@ def load_config() -> dict[str, Any]:
     if env_gemini:
         config["gemini_api_key"] = env_gemini.strip()
 
+    if os.getenv("TG_PROXY_ENABLED"):
+        config["proxy"]["enabled"] = os.getenv("TG_PROXY_ENABLED").lower() in ("1", "true", "yes")
+    if os.getenv("TG_PROXY_ADDR"):
+        config["proxy"]["addr"] = os.getenv("TG_PROXY_ADDR").strip()
+    if os.getenv("TG_PROXY_PORT"):
+        try:
+            config["proxy"]["port"] = int(os.getenv("TG_PROXY_PORT"))
+        except ValueError:
+            pass
+    if os.getenv("TG_PROXY_TYPE"):
+        config["proxy"]["type"] = os.getenv("TG_PROXY_TYPE").strip().lower()
+
     return config
 
 
@@ -56,16 +85,85 @@ def save_config(
     gemini_model: str = "gemini-1.5-flash",
 ) -> None:
     """Save api_id and api_hash to %APPDATA%\\tg-cli\\config.json."""
-    config = {
-        "api_id": int(api_id),
-        "api_hash": str(api_hash).strip(),
-        "gemini_api_key": str(gemini_api_key).strip(),
-        "gemini_model": str(gemini_model).strip() or "gemini-1.5-flash",
+    cfg = load_config()
+    cfg["api_id"] = int(api_id)
+    cfg["api_hash"] = str(api_hash).strip()
+    cfg["gemini_api_key"] = str(gemini_api_key).strip()
+    cfg["gemini_model"] = str(gemini_model).strip() or "gemini-1.5-flash"
+
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def get_proxy_config() -> dict[str, Any]:
+    """Retrieve current proxy settings."""
+    cfg = load_config()
+    return cfg.get("proxy", dict(DEFAULT_PROXY))
+
+
+def save_proxy_config(
+    enabled: bool,
+    proxy_type: str = "socks5",
+    addr: str = "127.0.0.1",
+    port: int = 1080,
+    username: str = "",
+    password: str = "",
+    secret: str = "",
+) -> None:
+    """Persist proxy settings to config.json."""
+    cfg = load_config()
+    cfg["proxy"] = {
+        "enabled": bool(enabled),
+        "type": str(proxy_type).strip().lower(),
+        "addr": str(addr).strip(),
+        "port": int(port),
+        "username": str(username).strip(),
+        "password": str(password).strip(),
+        "secret": str(secret).strip(),
     }
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+        json.dump(cfg, f, indent=2)
+
+
+def toggle_proxy() -> bool:
+    """Toggle proxy enabled flag and return the new state."""
+    cfg = load_config()
+    proxy = cfg.get("proxy", dict(DEFAULT_PROXY))
+    new_state = not proxy.get("enabled", False)
+    proxy["enabled"] = new_state
+    cfg["proxy"] = proxy
+
+    path = get_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    return new_state
+
+
+def probe_proxy_latency(proxy_cfg: dict[str, Any] | None = None, timeout: float = 2.0) -> float | None:
+    """Probe proxy endpoint connection and return roundtrip latency in milliseconds.
+
+    Returns None if unreachable, not configured, or if probe fails.
+    """
+    if proxy_cfg is None:
+        proxy_cfg = get_proxy_config()
+
+    addr = proxy_cfg.get("addr")
+    port = proxy_cfg.get("port")
+    if not addr or not port:
+        return None
+
+    try:
+        t0 = time.perf_counter()
+        with socket.create_connection((addr, int(port)), timeout=timeout):
+            latency_ms = (time.perf_counter() - t0) * 1000.0
+            return round(latency_ms, 1)
+    except Exception:
+        return None
 
 
 def has_api_credentials() -> bool:
@@ -85,3 +183,4 @@ def mark_help_seen() -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+

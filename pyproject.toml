@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "tg-cli"
 version = "0.1.0"
 description = "Keyboard-first Telegram client for Windows Terminal"
-readme = "PLAN.md"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "textual>=8.0.0",

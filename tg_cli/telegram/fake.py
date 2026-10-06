@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Sequence
 from tg_cli.domain.models import (
     Account,
     AuthState,
@@ -17,7 +17,9 @@ from tg_cli.domain.models import (
     Message,
     MessageKind,
     SendState,
+    SessionInfo,
     Transcript,
+    UserProfile,
 )
 
 
@@ -66,6 +68,12 @@ class FakeGateway:
         self.messages: dict[tuple[int, int], list[Message]] = {}
         self.drafts: dict[tuple[int, int], Draft] = {}
         self.transcripts: dict[tuple[int, int, int], Transcript] = {}
+        self.sessions: dict[int, list[SessionInfo]] = {}
+        self.profiles: dict[int, UserProfile] = {}
+        self._listeners: list[Callable[[str, dict], None]] = []
+        self.qr_login_active: bool = False
+        self.qr_token_url: str = ""
+        self.qr_expires_at: datetime | None = None
 
         self._seed_data(chat_count)
 
@@ -267,8 +275,83 @@ class FakeGateway:
             )
             self.chats[alice_id][cid] = chat
 
+        # Seed active sessions for Alice
+        self.sessions[alice_id] = [
+            SessionInfo(
+                hash=101,
+                device_model="Windows Terminal",
+                platform="Windows 11",
+                system_version="10.0.22631",
+                ip="192.168.1.50",
+                country="United States",
+                date_active=now,
+                is_current=True,
+                app_name="tg-cli",
+                app_version="2.0.0",
+            ),
+            SessionInfo(
+                hash=102,
+                device_model="iPhone 15 Pro",
+                platform="iOS 18.2",
+                system_version="18.2",
+                ip="73.120.45.12",
+                country="United States",
+                date_active=now - timedelta(hours=2),
+                is_current=False,
+                app_name="Telegram iOS",
+                app_version="11.4.1",
+            ),
+            SessionInfo(
+                hash=103,
+                device_model="Chrome 130",
+                platform="macOS 15.0",
+                system_version="15.0",
+                ip="73.120.45.12",
+                country="United States",
+                date_active=now - timedelta(days=3),
+                is_current=False,
+                app_name="Telegram Web",
+                app_version="2.1.0",
+            ),
+        ]
+
+        # Seed profile for Alice
+        self.profiles[alice_id] = UserProfile(
+            user_id=alice_id,
+            first_name="Alice",
+            last_name="Liddell",
+            username="alice",
+            phone="+12025550101",
+            bio="Keyboard-first terminal Telegram client 🚀",
+            status_emoji="💻",
+            is_online=True,
+        )
+
+    def register_listener(self, listener: Callable[[str, dict], None]) -> None:
+        if listener not in self._listeners:
+            self._listeners.append(listener)
+
+    def unregister_listener(self, listener: Callable[[str, dict], None]) -> None:
+        if listener in self._listeners:
+            self._listeners.remove(listener)
+
+    def _emit(self, event_type: str, data: dict) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(event_type, data)
+            except Exception:
+                pass
+
     def get_accounts(self) -> list[Account]:
         return list(self.accounts)
+
+    def get_account_unread_counts(self) -> dict[int, int]:
+        counts = {}
+        for acc in self.accounts:
+            acc_chats = self.chats.get(acc.user_id, {})
+            total = sum(c.unread_count for c in acc_chats.values() if not c.archived and not c.muted)
+            counts[acc.user_id] = total
+        return counts
 
     def add_account(self, account: Account) -> None:
         self.accounts.append(account)
@@ -514,3 +597,87 @@ class FakeGateway:
         tmp.write(b"OggS mock audio data for tg-cli voice transcription test")
         tmp.close()
         return Path(tmp.name)
+
+    def get_active_sessions(self, account_id: int) -> list[SessionInfo]:
+        return list(self.sessions.get(account_id, []))
+
+    def revoke_session(self, account_id: int, session_hash: int) -> bool:
+        sess_list = self.sessions.get(account_id, [])
+        for s in sess_list:
+            if s.hash == session_hash and s.is_current:
+                return False
+        initial_len = len(sess_list)
+        self.sessions[account_id] = [s for s in sess_list if s.hash != session_hash]
+        return len(self.sessions[account_id]) < initial_len
+
+    def get_user_profile(self, account_id: int) -> UserProfile:
+        if account_id in self.profiles:
+            return self.profiles[account_id]
+        acc = next((a for a in self.accounts if a.user_id == account_id), None)
+        prof = UserProfile(
+            user_id=account_id,
+            first_name=acc.display_name if acc else "User",
+            username=acc.username if acc else "",
+            phone=acc.phone if acc else "",
+            bio="",
+            status_emoji="",
+            is_online=True,
+        )
+        self.profiles[account_id] = prof
+        return prof
+
+    def update_user_profile(
+        self,
+        account_id: int,
+        bio: str | None = None,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ) -> UserProfile:
+        prof = self.get_user_profile(account_id)
+        if bio is not None:
+            prof.bio = bio
+        if username is not None:
+            prof.username = username
+        if first_name is not None:
+            prof.first_name = first_name
+        if last_name is not None:
+            prof.last_name = last_name
+        self.profiles[account_id] = prof
+        # Sync with account display if present
+        for acc in self.accounts:
+            if acc.user_id == account_id:
+                if username is not None:
+                    acc.username = username
+                if first_name is not None or last_name is not None:
+                    acc.display_name = f"{prof.first_name} {prof.last_name}".strip()
+        return prof
+
+    def start_qr_login(self, api_id: int, api_hash: str) -> None:
+        self.qr_login_active = True
+        self.qr_token_url = "tg://login?token=mock_qr_token_alice_123"
+        self.qr_expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        self._emit("qr_login_token", {
+            "url": self.qr_token_url,
+            "expires_in": 30,
+        })
+
+    def cancel_qr_login(self) -> None:
+        self.qr_login_active = False
+
+    def simulate_qr_scan(self, token_or_account: str | Account | None = None) -> None:
+        """Helper for test simulations."""
+        if isinstance(token_or_account, Account):
+            new_account = token_or_account
+        else:
+            new_account = Account(
+                user_id=1099,
+                phone="+12025550199",
+                username="qr_scanned_user",
+                display_name="QR Scanned User",
+                auth_state=AuthState.OK,
+            )
+        self.add_account(new_account)
+        self.qr_login_active = False
+        self._emit("login_success", {"account": new_account})
+

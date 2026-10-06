@@ -9,10 +9,19 @@ import asyncio
 import logging
 import queue
 import threading
+from datetime import datetime, timezone
 from typing import Any, Callable, Sequence
 from telethon import TelegramClient, errors
 from telethon.tl.types import User
-from tg_cli.domain.models import Account, AuthState, Chat, Folder
+from tg_cli.config import get_proxy_config
+from tg_cli.domain.models import (
+    Account,
+    AuthState,
+    Chat,
+    Folder,
+    SessionInfo,
+    UserProfile,
+)
 from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
@@ -32,6 +41,43 @@ from tg_cli.telegram.map import (
 
 logger = logging.getLogger("tg_cli.worker")
 logger.setLevel(logging.INFO)
+
+
+def create_telegram_client(
+    session: Any,
+    api_id: int,
+    api_hash: str,
+) -> TelegramClient:
+    """Instantiate a TelegramClient with MTProto/SOCKS5/HTTP proxy support if enabled."""
+    p_cfg = get_proxy_config()
+    if p_cfg.get("enabled") and p_cfg.get("addr") and p_cfg.get("port"):
+        p_type = p_cfg.get("type", "socks5").lower()
+        addr = str(p_cfg.get("addr"))
+        port = int(p_cfg.get("port"))
+        user = p_cfg.get("username") or None
+        password = p_cfg.get("password") or None
+        secret = p_cfg.get("secret") or None
+
+        if p_type in ("socks5", "socks4", "http"):
+            import socks
+            ptype = socks.SOCKS5 if p_type == "socks5" else (socks.SOCKS4 if p_type == "socks4" else socks.HTTP)
+            return TelegramClient(
+                str(session),
+                api_id,
+                api_hash,
+                proxy=(ptype, addr, port, True, user, password),
+            )
+        elif p_type == "mtproto":
+            from telethon.network import connection
+            return TelegramClient(
+                str(session),
+                api_id,
+                api_hash,
+                connection=connection.ConnectionTcpMTProxyRandomizedIntermediate,
+                proxy=(addr, port, secret),
+            )
+
+    return TelegramClient(str(session), api_id, api_hash)
 
 
 class WorkerCommand:
@@ -67,6 +113,53 @@ class CancelLoginCmd(WorkerCommand):
     pass
 
 
+class StartQrLoginCmd(WorkerCommand):
+    def __init__(self, api_id: int, api_hash: str) -> None:
+        self.api_id = api_id
+        self.api_hash = api_hash
+
+
+class CancelQrLoginCmd(WorkerCommand):
+    pass
+
+
+class GetSessionsCmd(WorkerCommand):
+    def __init__(self, user_id: int, result_queue: queue.Queue) -> None:
+        self.user_id = user_id
+        self.result_queue = result_queue
+
+
+class RevokeSessionCmd(WorkerCommand):
+    def __init__(self, user_id: int, session_hash: int, result_queue: queue.Queue) -> None:
+        self.user_id = user_id
+        self.session_hash = session_hash
+        self.result_queue = result_queue
+
+
+class GetProfileCmd(WorkerCommand):
+    def __init__(self, user_id: int, result_queue: queue.Queue) -> None:
+        self.user_id = user_id
+        self.result_queue = result_queue
+
+
+class UpdateProfileCmd(WorkerCommand):
+    def __init__(
+        self,
+        user_id: int,
+        bio: str | None,
+        username: str | None,
+        first_name: str | None,
+        last_name: str | None,
+        result_queue: queue.Queue,
+    ) -> None:
+        self.user_id = user_id
+        self.bio = bio
+        self.username = username
+        self.first_name = first_name
+        self.last_name = last_name
+        self.result_queue = result_queue
+
+
 class DisconnectAccountCmd(WorkerCommand):
     def __init__(self, user_id: int) -> None:
         self.user_id = user_id
@@ -98,6 +191,8 @@ class TelethonWorker(threading.Thread):
         self._login_phone_code_hash: str = ""
         self._login_api_id: int = 0
         self._login_api_hash: str = ""
+        self._qr_login: Any = None
+        self._qr_task: asyncio.Task | None = None
 
     def run(self) -> None:
         """Entrypoint for dedicated background thread."""
@@ -142,6 +237,18 @@ class TelethonWorker(threading.Thread):
             await self._handle_submit_password(cmd)
         elif isinstance(cmd, CancelLoginCmd):
             await self._cleanup_login_client()
+        elif isinstance(cmd, StartQrLoginCmd):
+            await self._handle_start_qr_login(cmd)
+        elif isinstance(cmd, CancelQrLoginCmd):
+            await self._cleanup_login_client()
+        elif isinstance(cmd, GetSessionsCmd):
+            await self._handle_get_sessions(cmd)
+        elif isinstance(cmd, RevokeSessionCmd):
+            await self._handle_revoke_session(cmd)
+        elif isinstance(cmd, GetProfileCmd):
+            await self._handle_get_profile(cmd)
+        elif isinstance(cmd, UpdateProfileCmd):
+            await self._handle_update_profile(cmd)
         elif isinstance(cmd, DisconnectAccountCmd):
             await self._disconnect_client(cmd.user_id)
 
@@ -151,7 +258,7 @@ class TelethonWorker(threading.Thread):
                 continue
 
             session_file = get_session_path(acc.user_id)
-            client = TelegramClient(str(session_file), cmd.api_id, cmd.api_hash)
+            client = create_telegram_client(session_file, cmd.api_id, cmd.api_hash)
             try:
                 await client.connect()
                 if await client.is_user_authorized():
@@ -183,7 +290,7 @@ class TelethonWorker(threading.Thread):
         self._login_api_hash = cmd.api_hash
         self._login_phone = cmd.phone
 
-        self._login_client = TelegramClient(str(temp_session), cmd.api_id, cmd.api_hash)
+        self._login_client = create_telegram_client(temp_session, cmd.api_id, cmd.api_hash)
         try:
             await self._login_client.connect()
             result = await self._login_client.send_code_request(cmd.phone)
@@ -233,6 +340,167 @@ class TelethonWorker(threading.Thread):
         except Exception as e:
             self._emit("login_error", {"error": f"2FA failed: {str(e)}"})
 
+    async def _handle_start_qr_login(self, cmd: StartQrLoginCmd) -> None:
+        await self._cleanup_login_client()
+        temp_session = get_session_path("temp_login")
+        self._login_api_id = cmd.api_id
+        self._login_api_hash = cmd.api_hash
+
+        self._login_client = create_telegram_client(temp_session, cmd.api_id, cmd.api_hash)
+        try:
+            await self._login_client.connect()
+            self._qr_login = await self._login_client.qr_login()
+            exp_sec = 30
+            if getattr(self._qr_login, "expires", None):
+                now_utc = datetime.now(timezone.utc)
+                exp_sec = max(5, int((self._qr_login.expires - now_utc).total_seconds()))
+            self._emit("qr_login_token", {
+                "url": self._qr_login.url,
+                "expires_in": exp_sec,
+            })
+            if self._qr_task and not self._qr_task.done():
+                self._qr_task.cancel()
+            self._qr_task = asyncio.create_task(self._wait_qr_login_loop())
+        except Exception as e:
+            logger.warning(f"start_qr_login failed: {e}")
+            self._emit("login_error", {"error": f"QR login failed: {str(e)}"})
+
+    async def _wait_qr_login_loop(self) -> None:
+        while self._qr_login and self._login_client:
+            try:
+                user = await self._qr_login.wait()
+                await self._finish_login(user)
+                break
+            except asyncio.TimeoutError:
+                if self._qr_login and self._login_client:
+                    try:
+                        await self._qr_login.recreate()
+                        exp_sec = 30
+                        if getattr(self._qr_login, "expires", None):
+                            now_utc = datetime.now(timezone.utc)
+                            exp_sec = max(5, int((self._qr_login.expires - now_utc).total_seconds()))
+                        self._emit("qr_login_token", {
+                            "url": self._qr_login.url,
+                            "expires_in": exp_sec,
+                        })
+                    except Exception as err:
+                        self._emit("login_error", {"error": f"QR refresh error: {str(err)}"})
+                        break
+            except errors.SessionPasswordNeededError:
+                self._emit("login_2fa_needed", {"hint": "Two-step verification active"})
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self._emit("login_error", {"error": f"QR error: {str(e)}"})
+                break
+
+    async def _handle_get_sessions(self, cmd: GetSessionsCmd) -> None:
+        client = self.clients.get(cmd.user_id)
+        if not client:
+            cmd.result_queue.put([])
+            return
+        try:
+            from telethon.tl.functions.account import GetAuthorizationsRequest
+            res = await client(GetAuthorizationsRequest())
+            sessions: list[SessionInfo] = []
+            for a in getattr(res, "authorizations", []):
+                sessions.append(
+                    SessionInfo(
+                        hash=getattr(a, "hash", 0),
+                        device_model=getattr(a, "device_model", "") or "Unknown Device",
+                        platform=getattr(a, "platform", "") or "",
+                        system_version=getattr(a, "system_version", "") or "",
+                        ip=getattr(a, "ip", "") or "",
+                        country=getattr(a, "country", "") or "",
+                        date_active=getattr(a, "date_active", None),
+                        date_created=getattr(a, "date_created", None),
+                        is_current=bool(getattr(a, "current", False)),
+                        app_name=getattr(a, "app_name", "") or "",
+                        app_version=getattr(a, "app_version", "") or "",
+                    )
+                )
+            cmd.result_queue.put(sessions)
+        except Exception as e:
+            logger.warning(f"Error fetching authorizations: {e}")
+            cmd.result_queue.put([])
+
+    async def _handle_revoke_session(self, cmd: RevokeSessionCmd) -> None:
+        client = self.clients.get(cmd.user_id)
+        if not client:
+            cmd.result_queue.put(False)
+            return
+        try:
+            from telethon.tl.functions.account import ResetAuthorizationRequest
+            await client(ResetAuthorizationRequest(hash=cmd.session_hash))
+            cmd.result_queue.put(True)
+        except Exception as e:
+            logger.warning(f"Error revoking authorization: {e}")
+            cmd.result_queue.put(False)
+
+    async def _handle_get_profile(self, cmd: GetProfileCmd) -> None:
+        client = self.clients.get(cmd.user_id)
+        if not client:
+            cmd.result_queue.put(UserProfile(user_id=cmd.user_id, first_name="User"))
+            return
+        try:
+            me = await client.get_me()
+            from telethon.tl.functions.users import GetFullUserRequest
+            from telethon.tl.types import InputUserSelf
+            full = await client(GetFullUserRequest(InputUserSelf()))
+            bio = getattr(full.full_user, "about", "") or ""
+            prof = UserProfile(
+                user_id=cmd.user_id,
+                first_name=getattr(me, "first_name", "") or "",
+                last_name=getattr(me, "last_name", "") or "",
+                username=getattr(me, "username", "") or "",
+                phone=getattr(me, "phone", "") or "",
+                bio=bio,
+                status_emoji="",
+                is_online=True,
+            )
+            cmd.result_queue.put(prof)
+        except Exception as e:
+            logger.warning(f"Error getting profile: {e}")
+            cmd.result_queue.put(UserProfile(user_id=cmd.user_id, first_name="User"))
+
+    async def _handle_update_profile(self, cmd: UpdateProfileCmd) -> None:
+        client = self.clients.get(cmd.user_id)
+        if not client:
+            cmd.result_queue.put(UserProfile(user_id=cmd.user_id, first_name="User"))
+            return
+        try:
+            from telethon.tl.functions.account import UpdateProfileRequest, UpdateUsernameRequest
+            if cmd.bio is not None or cmd.first_name is not None or cmd.last_name is not None:
+                kwargs: dict[str, Any] = {}
+                if cmd.bio is not None:
+                    kwargs["about"] = cmd.bio
+                if cmd.first_name is not None:
+                    kwargs["first_name"] = cmd.first_name
+                if cmd.last_name is not None:
+                    kwargs["last_name"] = cmd.last_name
+                await client(UpdateProfileRequest(**kwargs))
+
+            if cmd.username is not None:
+                await client(UpdateUsernameRequest(username=cmd.username))
+
+            # Fetch updated profile
+            me = await client.get_me()
+            prof = UserProfile(
+                user_id=cmd.user_id,
+                first_name=getattr(me, "first_name", "") or "",
+                last_name=getattr(me, "last_name", "") or "",
+                username=getattr(me, "username", "") or "",
+                phone=getattr(me, "phone", "") or "",
+                bio=cmd.bio or "",
+                status_emoji="",
+                is_online=True,
+            )
+            cmd.result_queue.put(prof)
+        except Exception as e:
+            logger.warning(f"Error updating profile: {e}")
+            cmd.result_queue.put(UserProfile(user_id=cmd.user_id, first_name="User"))
+
     async def _finish_login(self, user: Any) -> None:
         user_id = int(getattr(user, "id", 0))
         final_session = get_session_path(user_id)
@@ -248,7 +516,7 @@ class TelethonWorker(threading.Thread):
                 temp_session_file.rename(final_session_file)
 
         # Reopen with final session path and store
-        client = TelegramClient(str(final_session), self._login_api_id, self._login_api_hash)
+        client = create_telegram_client(final_session, self._login_api_id, self._login_api_hash)
         await client.connect()
         me = await client.get_me()
         account = map_telethon_user_to_account(me or user, str(final_session))
@@ -258,6 +526,10 @@ class TelethonWorker(threading.Thread):
         asyncio.create_task(self._sync_folders(account.user_id, client))
         asyncio.create_task(self._sync_dialogs(account.user_id, client))
 
+        if self._qr_task and not self._qr_task.done():
+            self._qr_task.cancel()
+        self._qr_task = None
+        self._qr_login = None
         self._login_client = None
         self._login_phone = ""
         self._login_phone_code_hash = ""
@@ -367,12 +639,24 @@ class TelethonWorker(threading.Thread):
             logger.debug(f"Could not fetch dialog filters: {type(e).__name__}")
 
     async def _cleanup_login_client(self) -> None:
+        if self._qr_task and not self._qr_task.done():
+            self._qr_task.cancel()
+        self._qr_task = None
+        self._qr_login = None
         if self._login_client:
             try:
                 await self._login_client.disconnect()
             except Exception:
                 pass
             self._login_client = None
+        self._login_phone = ""
+        self._login_phone_code_hash = ""
+        temp_file = get_session_path("temp_login").with_suffix(".session")
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
         self._login_phone = ""
         self._login_phone_code_hash = ""
         temp_file = get_session_path("temp_login").with_suffix(".session")

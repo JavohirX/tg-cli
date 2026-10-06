@@ -19,8 +19,11 @@ from tg_cli.domain.models import (
     Message,
     MessageKind,
     SendState,
+    SessionInfo,
     Transcript,
+    UserProfile,
 )
+import queue
 from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
@@ -28,6 +31,7 @@ from tg_cli.store.repo import (
     clear_draft as repo_clear_draft,
     delete_chats as repo_delete_chats,
     delete_messages as repo_delete_messages,
+    get_account_unread_counts as repo_get_account_unread_counts,
     get_accounts as repo_get_accounts,
     get_chat as repo_get_chat,
     get_chats as repo_get_chats,
@@ -46,13 +50,19 @@ from tg_cli.store.repo import (
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.telegram.worker import (
     CancelLoginCmd,
+    CancelQrLoginCmd,
     ConnectAccountsCmd,
     DisconnectAccountCmd,
+    GetProfileCmd,
+    GetSessionsCmd,
+    RevokeSessionCmd,
     StartLoginCmd,
+    StartQrLoginCmd,
     StopWorkerCmd,
     SubmitCodeCmd,
     SubmitPasswordCmd,
     TelethonWorker,
+    UpdateProfileCmd,
 )
 
 
@@ -288,4 +298,62 @@ class TelethonGateway:
         tmp.write(b"OggS mock audio data")
         tmp.close()
         return Path(tmp.name)
+
+    def get_account_unread_counts(self) -> dict[int, int]:
+        return repo_get_account_unread_counts(self.conn)
+
+    def get_active_sessions(self, account_id: int) -> list[SessionInfo]:
+        q: queue.Queue[list[SessionInfo]] = queue.Queue()
+        self.worker.submit_command(GetSessionsCmd(user_id=account_id, result_queue=q))
+        try:
+            return q.get(timeout=5.0)
+        except queue.Empty:
+            return []
+
+    def revoke_session(self, account_id: int, session_hash: int) -> bool:
+        q: queue.Queue[bool] = queue.Queue()
+        self.worker.submit_command(RevokeSessionCmd(user_id=account_id, session_hash=session_hash, result_queue=q))
+        try:
+            return q.get(timeout=5.0)
+        except queue.Empty:
+            return False
+
+    def get_user_profile(self, account_id: int) -> UserProfile:
+        q: queue.Queue[UserProfile] = queue.Queue()
+        self.worker.submit_command(GetProfileCmd(user_id=account_id, result_queue=q))
+        try:
+            return q.get(timeout=5.0)
+        except queue.Empty:
+            return UserProfile(user_id=account_id, first_name="User")
+
+    def update_user_profile(
+        self,
+        account_id: int,
+        bio: str | None = None,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ) -> UserProfile:
+        q: queue.Queue[UserProfile] = queue.Queue()
+        self.worker.submit_command(
+            UpdateProfileCmd(
+                user_id=account_id,
+                bio=bio,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                result_queue=q,
+            )
+        )
+        try:
+            return q.get(timeout=5.0)
+        except queue.Empty:
+            return UserProfile(user_id=account_id, first_name="User")
+
+    def start_qr_login(self, api_id: int, api_hash: str) -> None:
+        self.worker.submit_command(StartQrLoginCmd(api_id=api_id, api_hash=api_hash))
+
+    def cancel_qr_login(self) -> None:
+        self.worker.submit_command(CancelQrLoginCmd())
+
 

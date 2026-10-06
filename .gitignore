@@ -15,3 +15,8 @@ build/
 .venv/
 env/
 venv/
+*.log
+.env*
+config.json
+sessions/
+

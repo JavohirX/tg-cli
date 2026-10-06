@@ -91,8 +91,10 @@ class WindowedList(Widget, Generic[T]):
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
+        enable_digit_motion: bool = True,
     ) -> None:
         super().__init__(name=name, id=id, classes=classes)
+        self.enable_digit_motion = enable_digit_motion
         self._items: list[T] = list(items or [])
         self._renderer = renderer or self._default_render
         self._id_fn = id_fn or (lambda item: getattr(item, "identity", id(item)))
@@ -363,16 +365,17 @@ class WindowedList(Widget, Generic[T]):
                 event.stop()
                 return
 
-        char = event.character
-        if char is not None and char.isdigit():
-            # Don't allow starting with 0
-            if char == "0" and not self.digit_buffer:
-                return
-            self.digit_buffer += char
-            event.prevent_default()
-            event.stop()
-        elif event.key not in ("j", "k", "down", "up"):
-            self.digit_buffer = ""
+        if self.enable_digit_motion:
+            char = event.character
+            if char is not None and char.isdigit():
+                # Don't allow starting with 0
+                if char == "0" and not self.digit_buffer:
+                    return
+                self.digit_buffer += char
+                event.prevent_default()
+                event.stop()
+            elif event.key not in ("j", "k", "down", "up"):
+                self.digit_buffer = ""
 
     def render(self) -> RenderableType:
         """Render viewport height lines into a Group."""

@@ -158,3 +158,36 @@ class UnreadDivider:
     def identity(self) -> str:
         return "unread_divider"
 
+
+@dataclass(slots=True)
+class SessionInfo:
+    hash: int
+    device_model: str
+    platform: str
+    system_version: str
+    ip: str
+    country: str
+    date_active: datetime | None = None
+    date_created: datetime | None = None
+    is_current: bool = False
+    app_name: str = ""
+    app_version: str = ""
+
+    @property
+    def title(self) -> str:
+        parts = [p for p in (self.device_model, self.platform) if p]
+        return " · ".join(parts) or "Unknown Device"
+
+
+@dataclass(slots=True)
+class UserProfile:
+    user_id: int
+    first_name: str
+    last_name: str = ""
+    username: str = ""
+    phone: str = ""
+    bio: str = ""
+    status_emoji: str = ""
+    is_online: bool = True
+
+

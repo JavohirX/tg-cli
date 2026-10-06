@@ -82,6 +82,20 @@ def delete_account(conn: sqlite3.Connection, user_id: int) -> None:
         conn.execute("DELETE FROM accounts WHERE user_id = ?", (user_id,))
 
 
+def get_account_unread_counts(conn: sqlite3.Connection) -> dict[int, int]:
+    """Return map of account_id -> total unread count across non-archived non-muted chats."""
+    rows = conn.execute(
+        """
+        SELECT account_id, SUM(unread_count) as total_unread
+        FROM chats
+        WHERE archived = 0 AND muted = 0
+        GROUP BY account_id
+        """
+    ).fetchall()
+    return {r["account_id"]: int(r["total_unread"] or 0) for r in rows}
+
+
+
 # Folder operations
 def get_folders(conn: sqlite3.Connection, account_id: int) -> list[Folder]:
     rows = conn.execute(

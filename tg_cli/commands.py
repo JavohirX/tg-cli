@@ -348,6 +348,111 @@ COMMANDS: tuple[Command, ...] = (
         description="Insert newline into composer (or \\ then Enter)",
     ),
 
+    Command(
+        id="account_switch_1",
+        title="Switch to Account 1",
+        keys=("1",),
+        display_key="1",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 1",
+    ),
+    Command(
+        id="account_switch_2",
+        title="Switch to Account 2",
+        keys=("2",),
+        display_key="2",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 2",
+    ),
+    Command(
+        id="account_switch_3",
+        title="Switch to Account 3",
+        keys=("3",),
+        display_key="3",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 3",
+    ),
+    Command(
+        id="account_switch_4",
+        title="Switch to Account 4",
+        keys=("4",),
+        display_key="4",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 4",
+    ),
+    Command(
+        id="account_switch_5",
+        title="Switch to Account 5",
+        keys=("5",),
+        display_key="5",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 5",
+    ),
+    Command(
+        id="account_switch_6",
+        title="Switch to Account 6",
+        keys=("6",),
+        display_key="6",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 6",
+    ),
+    Command(
+        id="account_switch_7",
+        title="Switch to Account 7",
+        keys=("7",),
+        display_key="7",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 7",
+    ),
+    Command(
+        id="account_switch_8",
+        title="Switch to Account 8",
+        keys=("8",),
+        display_key="8",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 8",
+    ),
+    Command(
+        id="account_switch_9",
+        title="Switch to Account 9",
+        keys=("9",),
+        display_key="9",
+        contexts=("global", "chats", "messages", "accounts"),
+        description="Instant switch to account 9",
+    ),
+    Command(
+        id="qr_login",
+        title="QR Code Login",
+        keys=("q", "Q"),
+        display_key="Q",
+        contexts=("accounts", "login"),
+        description="Authenticate via Terminal ASCII QR code scan",
+    ),
+    Command(
+        id="toggle_proxy",
+        title="Toggle Proxy",
+        keys=(),
+        display_key="Palette",
+        contexts=("global", "accounts", "chats", "messages"),
+        description="Toggle configured MTProto/SOCKS5/HTTP proxy on or off",
+    ),
+    Command(
+        id="manage_sessions",
+        title="Active Sessions",
+        keys=("s", "S"),
+        display_key="S",
+        contexts=("accounts", "global"),
+        description="Inspect active sessions and revoke suspicious devices",
+    ),
+    Command(
+        id="manage_profile",
+        title="User Profile & Status",
+        keys=("p", "P"),
+        display_key="P",
+        contexts=("accounts", "global"),
+        description="View and edit profile bio, username, and status",
+    ),
+
     # Account Screen Actions
     Command(
         id="open_account",
@@ -407,17 +512,37 @@ def get_footer_hints(screen_context: str, is_write_mode: bool = False) -> list[t
     if screen_context == "accounts":
         return [
             ("Enter", "Open"),
+            ("1-9", "Switch"),
             ("A", "Add"),
+            ("Q", "QR"),
+            ("S", "Sessions"),
+            ("P", "Profile"),
             ("D", "Remove"),
             ("Ctrl+K", "Palette"),
             ("?", "Help"),
             ("Esc", "Exit"),
         ]
 
+    if screen_context == "sessions":
+        return [
+            ("j/k", "Navigate"),
+            ("d", "Revoke"),
+            ("r", "Refresh"),
+            ("Esc", "Back"),
+        ]
+
+    if screen_context == "profile":
+        return [
+            ("b", "Edit Bio"),
+            ("u", "Edit Username"),
+            ("Esc", "Back"),
+        ]
+
     if screen_context == "chats":
         return [
             ("Enter", "Open"),
             ("j/k", "Navigate"),
+            ("1-9", "Accounts"),
             ("v", "Select"),
             ("/", "Filter"),
             ("[ ]", "Folders"),

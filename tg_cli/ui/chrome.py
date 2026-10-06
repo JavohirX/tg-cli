@@ -13,7 +13,7 @@ from tg_cli.domain.models import Account, Folder
 
 
 class AccountStrip(Widget):
-    """Horizontal strip showing current accounts and active account highlight."""
+    """Horizontal strip showing current accounts, numbers 1-9, unread badges, and proxy status."""
 
     DEFAULT_CSS = """
     AccountStrip {
@@ -29,15 +29,37 @@ class AccountStrip(Widget):
         self,
         accounts: Sequence[Account] | None = None,
         active_index: int = 0,
+        unread_counts: dict[int, int] | None = None,
+        proxy_status: str | None = None,
         **kwargs,
     ) -> None:
         super().__init__(**kwargs)
         self.accounts = list(accounts or [])
         self.active_index = active_index
+        self.unread_counts = dict(unread_counts or {})
+        self.proxy_status = proxy_status
 
-    def set_accounts(self, accounts: Sequence[Account], active_index: int = 0) -> None:
+    def set_accounts(
+        self,
+        accounts: Sequence[Account],
+        active_index: int = 0,
+        unread_counts: dict[int, int] | None = None,
+        proxy_status: str | None = None,
+    ) -> None:
         self.accounts = list(accounts)
         self.active_index = active_index
+        if unread_counts is not None:
+            self.unread_counts = dict(unread_counts)
+        if proxy_status is not None:
+            self.proxy_status = proxy_status
+        self.refresh()
+
+    def set_proxy_status(self, status: str | None) -> None:
+        self.proxy_status = status
+        self.refresh()
+
+    def set_unread_counts(self, counts: dict[int, int]) -> None:
+        self.unread_counts = dict(counts)
         self.refresh()
 
     def render(self) -> RenderResult:
@@ -48,14 +70,24 @@ class AccountStrip(Widget):
 
         for i, acc in enumerate(self.accounts):
             is_active = (i == self.active_index)
-            label = acc.label
+            num_prefix = f"{i + 1}: " if i < 9 else ""
+            unread = self.unread_counts.get(acc.user_id, 0)
+            unread_badge = f" ({unread})" if unread > 0 else ""
+            pill = f"[{num_prefix}{acc.label}{unread_badge}]"
+
             if is_active:
-                strip.append(f" {label} ", style="bold white on blue")
+                strip.append(f" {pill} ", style="bold white on blue")
             else:
-                strip.append(f" {label} ", style="dim")
+                if unread > 0:
+                    strip.append(f" {pill} ", style="bold yellow")
+                else:
+                    strip.append(f" {pill} ", style="dim")
             strip.append(" ")
 
-        strip.append("  (F2 / Shift+F2 to switch)", style="dim italic")
+        if self.proxy_status:
+            strip.append(f" {self.proxy_status} ", style="bold cyan on grey19")
+
+        strip.append("  (1-9 / F2 to switch)", style="dim italic")
         return strip
 
 

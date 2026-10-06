@@ -91,6 +91,7 @@ class ChatsScreen(Screen):
             id_fn=lambda c: c.chat_id,
             is_selectable_fn=lambda c: True,
             id="chat-window-list",
+            enable_digit_motion=False,
         )
 
     def compose(self) -> ComposeResult:
@@ -105,12 +106,7 @@ class ChatsScreen(Screen):
             yield self.footer_bar
 
     def on_mount(self) -> None:
-        self.accounts = self.gateway.get_accounts()
-        acc_idx = next(
-            (i for i, a in enumerate(self.accounts) if a.user_id == self.account.user_id),
-            0,
-        )
-        self.account_strip.set_accounts(self.accounts, active_index=acc_idx)
+        self._update_account_strip()
         self.folders = self.gateway.get_folders(self.account.user_id)
         self.folder_strip.set_folders(self.folders, active_folder_id=self.current_folder_id)
 
@@ -270,6 +266,43 @@ class ChatsScreen(Screen):
         self.chat_list.clear_selection()
         self.refresh_chats(initial=True)
 
+    def _update_account_strip(self) -> None:
+        self.accounts = self.gateway.get_accounts()
+        acc_idx = next(
+            (i for i, a in enumerate(self.accounts) if a.user_id == self.account.user_id),
+            0,
+        )
+        unread_counts = {}
+        if hasattr(self.gateway, "get_account_unread_counts"):
+            try:
+                unread_counts = self.gateway.get_account_unread_counts()
+            except Exception:
+                pass
+
+        from tg_cli.config import get_proxy_config, probe_proxy_latency
+        proxy_cfg = get_proxy_config()
+        proxy_str = None
+        if proxy_cfg.get("enabled"):
+            lat = probe_proxy_latency(proxy_cfg)
+            proxy_str = f"[proxy: {lat}ms]" if lat is not None else "[proxy: ON]"
+
+        self.account_strip.set_accounts(
+            self.accounts,
+            active_index=acc_idx,
+            unread_counts=unread_counts,
+            proxy_status=proxy_str,
+        )
+
+    def action_switch_account_index(self, index: int) -> None:
+        if 0 <= index < len(self.accounts):
+            self.account = self.accounts[index]
+            self._update_account_strip()
+            self.folders = self.gateway.get_folders(self.account.user_id)
+            self.current_folder_id = None
+            self.folder_strip.set_folders(self.folders, active_folder_id=None)
+            self.chat_list.clear_selection()
+            self.refresh_chats(initial=True)
+
     def action_next_account(self) -> None:
         if len(self.accounts) <= 1:
             return
@@ -278,13 +311,7 @@ class ChatsScreen(Screen):
             0,
         )
         next_idx = (curr_idx + 1) % len(self.accounts)
-        self.account = self.accounts[next_idx]
-        self.account_strip.set_accounts(self.accounts, active_index=next_idx)
-        self.folders = self.gateway.get_folders(self.account.user_id)
-        self.current_folder_id = None
-        self.folder_strip.set_folders(self.folders, active_folder_id=None)
-        self.chat_list.clear_selection()
-        self.refresh_chats(initial=True)
+        self.action_switch_account_index(next_idx)
 
     def action_prev_account(self) -> None:
         if len(self.accounts) <= 1:
@@ -294,13 +321,27 @@ class ChatsScreen(Screen):
             0,
         )
         prev_idx = (curr_idx - 1) % len(self.accounts)
-        self.account = self.accounts[prev_idx]
-        self.account_strip.set_accounts(self.accounts, active_index=prev_idx)
-        self.folders = self.gateway.get_folders(self.account.user_id)
-        self.current_folder_id = None
-        self.folder_strip.set_folders(self.folders, active_folder_id=None)
-        self.chat_list.clear_selection()
-        self.refresh_chats(initial=True)
+        self.action_switch_account_index(prev_idx)
+
+    def action_toggle_proxy(self) -> None:
+        from tg_cli.config import get_proxy_config, probe_proxy_latency, toggle_proxy
+        new_state = toggle_proxy()
+        if new_state:
+            cfg = get_proxy_config()
+            lat = probe_proxy_latency(cfg)
+            lat_str = f" ({lat}ms)" if lat is not None else ""
+            self.status_bar.set_toast(f"Proxy enabled: {cfg.get('type')} {cfg.get('addr')}:{cfg.get('port')}{lat_str}")
+        else:
+            self.status_bar.set_toast("Proxy disabled.")
+        self._update_account_strip()
+
+    def action_manage_sessions(self) -> None:
+        from tg_cli.ui.screens.sessions import SessionsScreen
+        self.app.push_screen(SessionsScreen(gateway=self.gateway, account=self.account))
+
+    def action_manage_profile(self) -> None:
+        from tg_cli.ui.screens.profile import ProfileScreen
+        self.app.push_screen(ProfileScreen(gateway=self.gateway, account=self.account))
 
     def _get_target_chats(self) -> list[Chat]:
         selected = self.chat_list.get_selected_items()
@@ -468,6 +509,35 @@ class ChatsScreen(Screen):
             event.stop()
             return
 
+    def on_key(self, event: Key) -> None:
+        if self._pending_confirm is not None:
+            prompt, on_confirm = self._pending_confirm
+            if event.character in ("y", "Y"):
+                self._pending_confirm = None
+                self.status_bar.set_prompt(None)
+                on_confirm()
+                event.prevent_default()
+                event.stop()
+                return
+            elif event.character in ("n", "N") or event.key == "escape":
+                self._pending_confirm = None
+                self.status_bar.set_prompt(None)
+                self.status_bar.set_status("Action cancelled.")
+                event.prevent_default()
+                event.stop()
+                return
+
+        container = self.query_one("#filter-container")
+        if not container.display:
+            key_char = event.character or event.key
+            if key_char and key_char in "123456789":
+                idx = int(key_char) - 1
+                if 0 <= idx < len(self.accounts):
+                    self.action_switch_account_index(idx)
+                    event.prevent_default()
+                    event.stop()
+                    return
+
     def action_handle_escape(self) -> None:
         # Esc stack rule:
         # 1. Confirmation prompt
@@ -537,6 +607,12 @@ class ChatsScreen(Screen):
                     self.action_next_account()
                 case "account_prev":
                     self.action_prev_account()
+                case "toggle_proxy":
+                    self.action_toggle_proxy()
+                case "manage_sessions":
+                    self.action_manage_sessions()
+                case "manage_profile":
+                    self.action_manage_profile()
                 case "folder_prev":
                     self.action_prev_folder()
                 case "folder_next":
@@ -549,6 +625,9 @@ class ChatsScreen(Screen):
                     self.chat_list.action_toggle_select()
                 case "clear_selection":
                     self.chat_list.clear_selection()
+                case _ if getattr(cmd, "id", "").startswith("account_switch_"):
+                    idx = int(cmd.id.split("_")[-1]) - 1
+                    self.action_switch_account_index(idx)
 
         if getattr(cmd, "destructive", False):
             self._request_confirm(

@@ -6,7 +6,16 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Protocol, Sequence
-from tg_cli.domain.models import Account, Chat, Draft, Folder, Message, Transcript
+from tg_cli.domain.models import (
+    Account,
+    Chat,
+    Draft,
+    Folder,
+    Message,
+    SessionInfo,
+    Transcript,
+    UserProfile,
+)
 
 
 class Gateway(Protocol):
@@ -14,6 +23,10 @@ class Gateway(Protocol):
 
     def get_accounts(self) -> list[Account]:
         """Return list of authenticated accounts."""
+        ...
+
+    def get_account_unread_counts(self) -> dict[int, int]:
+        """Return mapping of account_id -> total unread count."""
         ...
 
     def remove_account(self, user_id: int) -> None:
@@ -147,3 +160,35 @@ class Gateway(Protocol):
     def download_voice_file(self, account_id: int, chat_id: int, message_id: int) -> Path:
         """Download voice message audio to a temporary file path."""
         ...
+
+    def get_active_sessions(self, account_id: int) -> list[SessionInfo]:
+        """Return list of active authorizations/sessions for the account."""
+        ...
+
+    def revoke_session(self, account_id: int, session_hash: int) -> bool:
+        """Revoke active authorization by its hash."""
+        ...
+
+    def get_user_profile(self, account_id: int) -> UserProfile:
+        """Get profile details for the account user."""
+        ...
+
+    def update_user_profile(
+        self,
+        account_id: int,
+        bio: str | None = None,
+        username: str | None = None,
+        first_name: str | None = None,
+        last_name: str | None = None,
+    ) -> UserProfile:
+        """Update profile bio, username, or name."""
+        ...
+
+    def start_qr_login(self, api_id: int, api_hash: str) -> None:
+        """Initiate QR code login token generation."""
+        ...
+
+    def cancel_qr_login(self) -> None:
+        """Cancel in-progress QR code login."""
+        ...
+
