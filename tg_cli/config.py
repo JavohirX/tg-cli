@@ -9,6 +9,7 @@ import json
 import os
 import socket
 import time
+from pathlib import Path
 from typing import Any
 from tg_cli.paths import get_config_path
 
@@ -23,8 +24,30 @@ DEFAULT_PROXY = {
 }
 
 
+def _load_dotenv_if_exists() -> None:
+    """Load key-value pairs from .env in current directory or user app data if not already set."""
+    candidates = [Path(".env"), get_config_path().parent / ".env"]
+    for path in candidates:
+        if path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#") or "=" not in line:
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+
 def load_config() -> dict[str, Any]:
     """Load configuration from config.json with env var fallbacks."""
+    _load_dotenv_if_exists()
+
     config: dict[str, Any] = {
         "api_id": None,
         "api_hash": "",
