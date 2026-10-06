@@ -16,7 +16,9 @@ build/
 env/
 venv/
 *.log
-.env*
+.env
+.env.*
+!.env.example
 config.json
 sessions/
 
