@@ -61,6 +61,23 @@ class Gateway(Protocol):
         """Return messages for chat, oldest to newest or paged before an id."""
         ...
 
+    def get_message(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_id: int,
+    ) -> Message | None:
+        """Return a single message by id."""
+        ...
+
+    def request_member_roles(self, account_id: int, chat_id: int) -> None:
+        """Load admin and owner ids for a group or channel.
+
+        The result arrives as a roles_changed event: {user_id, chat_id, roles}.
+        roles maps a sender id to "admin" or "owner".
+        """
+        ...
+
     def send_message(
         self,
         account_id: int,

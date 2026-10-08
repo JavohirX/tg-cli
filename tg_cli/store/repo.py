@@ -343,6 +343,38 @@ def get_messages(
     return result
 
 
+def get_message(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    message_id: int,
+) -> Message | None:
+    row = conn.execute(
+        "SELECT * FROM messages WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+        (account_id, chat_id, message_id),
+    ).fetchone()
+    if not row:
+        return None
+    return Message(
+        account_id=row["account_id"],
+        chat_id=row["chat_id"],
+        message_id=row["message_id"],
+        sender_id=row["sender_id"],
+        sender_name=row["sender_name"],
+        date=_parse_iso(row["date"]),
+        kind=MessageKind(row["kind"]),
+        plain_text=row["plain_text"] or "",
+        caption=row["caption"] or "",
+        entity_spans=json.loads(row["entity_spans"]) if row["entity_spans"] else [],
+        reply_id=row["reply_id"],
+        forward_label=row["forward_label"] or "",
+        edited=bool(row["edited"]),
+        outgoing=bool(row["outgoing"]),
+        send_state=SendState(row["send_state"]),
+        is_deleted=bool(row["is_deleted"]),
+    )
+
+
 def upsert_messages(conn: sqlite3.Connection, messages: Sequence[Message]) -> None:
     with conn:
         conn.executemany(

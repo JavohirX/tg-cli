@@ -35,6 +35,7 @@ class MessageKind(str, Enum):
     CONTACT = "contact"
     POLL = "poll"
     OTHER = "other"
+    SERVICE = "service"
 
 
 class SendState(str, Enum):

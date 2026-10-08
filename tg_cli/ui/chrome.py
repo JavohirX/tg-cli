@@ -181,12 +181,12 @@ class StatusBar(Widget):
 
         # Prompt has highest priority
         if self.prompt_message:
-            text.append(f"❓ {self.prompt_message} ", style="bold yellow on grey23")
+            text.append(f"[?] {self.prompt_message} ", style="bold yellow on grey23")
             return text
 
         # Toast notification has next priority
         if self.toast_message:
-            text.append(f"ℹ {self.toast_message} ", style="bold white on dark_magenta")
+            text.append(f"[i] {self.toast_message} ", style="bold white on dark_magenta")
             return text
 
         # General status

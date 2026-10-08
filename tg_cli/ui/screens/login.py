@@ -29,6 +29,8 @@ class LoginScreen(ModalScreen[bool]):
     #login-box {
         width: 76;
         height: auto;
+        max-height: 95vh;
+        overflow-y: auto;
         min-height: 16;
         background: $surface;
         border: thick $primary;
@@ -63,6 +65,13 @@ class LoginScreen(ModalScreen[bool]):
     #login-input {
         width: 100%;
         margin-bottom: 1;
+        /* Default Input border is `tall` (eighth-blocks ▊▔▎▁). Console fonts
+           that lack those glyphs draw a replacement "?", so the phone field
+           looks like a box of question marks. Box-drawing `solid` is in those fonts. */
+        border: solid $primary;
+    }
+    #login-input:focus {
+        border: solid $accent;
     }
     #login-error {
         height: auto;
@@ -115,7 +124,7 @@ class LoginScreen(ModalScreen[bool]):
         self.progress_widget = Static("", id="login-progress")
         self.input_widget = Input(id="login-input")
         self.error_widget = Static("", id="login-error")
-        self.status_widget = Static("Press Esc to cancel · Ctrl+Q for QR Login", id="login-status")
+        self.status_widget = Static("Press Esc to cancel | Ctrl+Q for QR Login", id="login-status")
 
     def compose(self) -> ComposeResult:
         with Vertical(id="login-box"):
@@ -138,18 +147,25 @@ class LoginScreen(ModalScreen[bool]):
         self._stop_qr_timer()
 
     def _on_gateway_event(self, event_type: str, data: dict[str, Any]) -> None:
-        if event_type == "qr_login_token":
-            url = data.get("url", "")
-            exp = data.get("expires_in", 30)
-            self.on_qr_token(url, exp)
-        elif event_type == "login_code_sent":
-            self.on_login_code_sent(data.get("phone", ""))
-        elif event_type == "login_2fa_needed":
-            self.on_login_2fa_needed(data.get("hint", ""))
-        elif event_type == "login_error":
-            self.on_login_error(data.get("error", ""))
-        elif event_type == "login_success":
-            self.on_login_success()
+        def _dispatch() -> None:
+            if event_type == "qr_login_token":
+                self.on_qr_token(data.get("url", ""), data.get("expires_in", 30))
+            elif event_type == "login_code_sent":
+                self.on_login_code_sent(data.get("phone", ""))
+            elif event_type == "login_2fa_needed":
+                self.on_login_2fa_needed(data.get("hint", ""))
+            elif event_type == "login_error":
+                self.on_login_error(data.get("error", ""))
+            elif event_type == "login_success":
+                self.on_login_success()
+
+        if self.is_mounted and hasattr(self, "app") and self.app:
+            try:
+                self.app.call_from_thread(_dispatch)
+                return
+            except Exception:
+                pass
+        _dispatch()
 
     def _stop_qr_timer(self) -> None:
         if self._qr_timer is not None:
@@ -181,8 +197,8 @@ class LoginScreen(ModalScreen[bool]):
             self.progress_widget.display = True
             self.title_widget.update("Terminal QR Code Login")
             self.hint_widget.update(
-                "Scan with Telegram: Settings → Devices → Link Desktop Device\n"
-                "Press 'P' or Ctrl+Q for phone login · Esc to cancel"
+                "Scan with Telegram: Settings -> Devices -> Link Desktop Device\n"
+                "Press 'P' or Ctrl+Q for phone login | Esc to cancel"
             )
             self.status_widget.update("Waiting for scan from Telegram mobile app...")
             self.qr_widget.focus()
@@ -200,7 +216,7 @@ class LoginScreen(ModalScreen[bool]):
             )
             self.input_widget.placeholder = "+12025550101"
             self.input_widget.password = False
-            self.status_widget.update("Press Enter to request code · Ctrl+Q for QR · Esc to cancel")
+            self.status_widget.update("Press Enter to request code | Ctrl+Q for QR | Esc to cancel")
             self.input_widget.focus()
 
         elif self.step == "code":
@@ -212,7 +228,7 @@ class LoginScreen(ModalScreen[bool]):
             self.hint_widget.update(f"Code sent to {self.phone} via Telegram/SMS:")
             self.input_widget.placeholder = "12345"
             self.input_widget.password = False
-            self.status_widget.update("Enter verification code · Esc to cancel")
+            self.status_widget.update("Enter verification code | Esc to cancel")
             self.input_widget.focus()
 
         elif self.step == "password":
@@ -224,7 +240,7 @@ class LoginScreen(ModalScreen[bool]):
             self.hint_widget.update("Enter your 2FA password:")
             self.input_widget.placeholder = "Password"
             self.input_widget.password = True
-            self.status_widget.update("Enter 2FA password · Esc to cancel")
+            self.status_widget.update("Enter 2FA password | Esc to cancel")
             self.input_widget.focus()
 
     def _request_qr_token(self) -> None:
@@ -366,7 +382,7 @@ class LoginScreen(ModalScreen[bool]):
 
     def on_login_error(self, error: str) -> None:
         self.error_message = error
-        self.error_widget.update(f"⚠ {error}")
+        self.error_widget.update(f"[!] {error}")
         self.status_widget.update("Please check and try again.")
         if self.step != "qr":
             self.input_widget.focus()

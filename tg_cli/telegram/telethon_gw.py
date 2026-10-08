@@ -38,6 +38,7 @@ from tg_cli.store.repo import (
     get_draft as repo_get_draft,
     get_folders as repo_get_folders,
     get_messages as repo_get_messages,
+    get_message as repo_get_message,
     get_transcript as repo_get_transcript,
     mark_chats_read as repo_mark_chats_read,
     mute_chats as repo_mute_chats,
@@ -47,15 +48,22 @@ from tg_cli.store.repo import (
     upsert_messages as repo_upsert_messages,
     upsert_transcript as repo_upsert_transcript,
 )
+import time
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.telegram.worker import (
     CancelLoginCmd,
     CancelQrLoginCmd,
     ConnectAccountsCmd,
+    DeleteMessagesCmd,
     DisconnectAccountCmd,
+    EditMessageCmd,
+    FetchMessagesCmd,
+    FetchRolesCmd,
     GetProfileCmd,
     GetSessionsCmd,
+    MarkChatReadCmd,
     RevokeSessionCmd,
+    SendMessageCmd,
     StartLoginCmd,
     StartQrLoginCmd,
     StopWorkerCmd,
@@ -87,6 +95,9 @@ class TelethonGateway:
         )
         self._temp_msg_counter = -1
         self._lock = threading.Lock()
+        self._in_flight_fetches: set[tuple[int, int, int | None]] = set()
+        self._last_fetch_time: dict[tuple[int, int, int | None], float] = {}
+        self._member_roles: dict[tuple[int, int], dict[int, str]] = {}
 
     def register_listener(self, listener: Callable[[str, dict[str, Any]], None]) -> None:
         if listener not in self._listeners:
@@ -97,6 +108,29 @@ class TelethonGateway:
             self._listeners.remove(listener)
 
     def _on_worker_event(self, event_type: str, data: dict[str, Any]) -> None:
+        if event_type == "fetch_messages_done":
+            user_id = data.get("user_id")
+            chat_id = data.get("chat_id")
+            before_id = data.get("before_id")
+            key = (user_id, chat_id, before_id)
+            with self._lock:
+                self._in_flight_fetches.discard(key)
+                self._last_fetch_time[key] = time.time()
+        elif event_type == "roles_changed" and not data.get("error"):
+            user_id = data.get("user_id")
+            chat_id = data.get("chat_id")
+            if user_id is not None and chat_id is not None:
+                roles = {
+                    int(uid): role
+                    for uid, role in (data.get("roles") or {}).items()
+                    if role in ("admin", "owner")
+                }
+                self._member_roles[(int(user_id), int(chat_id))] = roles
+
+        try:
+            self.event_callback(event_type, data)
+        except Exception:
+            pass
         for listener in list(self._listeners):
             try:
                 listener(event_type, data)
@@ -121,10 +155,6 @@ class TelethonGateway:
         self.worker.submit_command(StopWorkerCmd())
         self.worker.join(timeout=3.0)
         self.conn.close()
-
-    def _on_worker_event(self, event_type: str, data: dict[str, Any]) -> None:
-        # Re-fetch or refresh cached connection if needed
-        self.event_callback(event_type, data)
 
     # Gateway Protocol implementation
     def get_accounts(self) -> list[Account]:
@@ -152,7 +182,90 @@ class TelethonGateway:
         before_id: int | None = None,
         search_query: str = "",
     ) -> list[Message]:
-        return repo_get_messages(self.conn, account_id, chat_id, limit, before_id, search_query)
+        cached = repo_get_messages(self.conn, account_id, chat_id, limit, before_id, search_query)
+        if not search_query:
+            self._maybe_fetch_messages(account_id, chat_id, limit, before_id, len(cached))
+        return cached
+
+    def _maybe_fetch_messages(
+        self,
+        account_id: int,
+        chat_id: int,
+        limit: int,
+        before_id: int | None,
+        cached_count: int,
+    ) -> None:
+        key = (account_id, chat_id, before_id)
+        now = time.time()
+        with self._lock:
+            if key in self._in_flight_fetches:
+                return
+
+            last_time = self._last_fetch_time.get(key, 0.0)
+            should_fetch = False
+            if cached_count == 0:
+                should_fetch = (now - last_time) > 2.0
+            elif before_id is None:
+                should_fetch = (now - last_time) > 15.0
+            elif cached_count < limit:
+                should_fetch = (now - last_time) > 5.0
+
+            if should_fetch:
+                self._in_flight_fetches.add(key)
+                self.worker.submit_command(
+                    FetchMessagesCmd(
+                        account_id=account_id,
+                        chat_id=chat_id,
+                        limit=limit,
+                        before_id=before_id,
+                    )
+                )
+
+    def request_member_roles(self, account_id: int, chat_id: int) -> None:
+        """Load admin and owner ids. A cached map is delivered immediately."""
+        key = (account_id, chat_id)
+        cached = self._member_roles.get(key)
+        if cached is not None:
+            payload = {
+                "user_id": account_id,
+                "chat_id": chat_id,
+                "roles": dict(cached),
+            }
+            for listener in list(self._listeners):
+                try:
+                    listener("roles_changed", payload)
+                except Exception:
+                    pass
+        self.worker.submit_command(FetchRolesCmd(account_id=account_id, chat_id=chat_id))
+
+    def fetch_messages(
+        self,
+        account_id: int,
+        chat_id: int,
+        limit: int = 50,
+        before_id: int | None = None,
+    ) -> None:
+        """Explicitly request message history synchronization from Telegram."""
+        key = (account_id, chat_id, before_id)
+        with self._lock:
+            self._in_flight_fetches.add(key)
+            self.worker.submit_command(
+                FetchMessagesCmd(
+                    account_id=account_id,
+                    chat_id=chat_id,
+                    limit=limit,
+                    before_id=before_id,
+                )
+            )
+
+    def get_message(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_id: int,
+    ) -> Message | None:
+        """Return a single message by id from the database repository."""
+        return repo_get_message(self.conn, account_id, chat_id, message_id)
 
     def send_message(
         self,
@@ -179,6 +292,15 @@ class TelethonGateway:
             send_state=SendState.QUEUED,
         )
         repo_upsert_messages(self.conn, [msg])
+        self.worker.submit_command(
+            SendMessageCmd(
+                account_id=account_id,
+                chat_id=chat_id,
+                temp_msg_id=temp_id,
+                text=text,
+                reply_to_id=reply_to_id,
+            )
+        )
         return msg
 
     def edit_message(
@@ -188,15 +310,30 @@ class TelethonGateway:
         message_id: int,
         text: str,
     ) -> Message:
-        msg = Message(
-            account_id=account_id,
-            chat_id=chat_id,
-            message_id=message_id,
-            plain_text=text,
-            edited=True,
+        with self.conn:
+            self.conn.execute(
+                "UPDATE messages SET plain_text = ?, edited = 1 WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                (text, account_id, chat_id, message_id),
+            )
+        msgs = repo_get_messages(self.conn, account_id, chat_id, limit=1, before_id=message_id + 1)
+        updated = next((m for m in msgs if m.message_id == message_id), None)
+        if not updated:
+            updated = Message(
+                account_id=account_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                plain_text=text,
+                edited=True,
+            )
+        self.worker.submit_command(
+            EditMessageCmd(
+                account_id=account_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text,
+            )
         )
-        repo_upsert_messages(self.conn, [msg])
-        return msg
+        return updated
 
     def delete_messages(
         self,
@@ -205,6 +342,13 @@ class TelethonGateway:
         message_ids: Sequence[int],
     ) -> None:
         repo_delete_messages(self.conn, account_id, chat_id, message_ids)
+        self.worker.submit_command(
+            DeleteMessagesCmd(
+                account_id=account_id,
+                chat_id=chat_id,
+                message_ids=message_ids,
+            )
+        )
 
     def archive_chats(
         self,
@@ -229,6 +373,13 @@ class TelethonGateway:
         read: bool = True,
     ) -> None:
         repo_mark_chats_read(self.conn, account_id, chat_ids, read)
+        if read:
+            self.worker.submit_command(
+                MarkChatReadCmd(
+                    account_id=account_id,
+                    chat_ids=chat_ids,
+                )
+            )
 
     def delete_chats(
         self,

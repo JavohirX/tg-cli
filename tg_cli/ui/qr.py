@@ -74,6 +74,6 @@ def render_progress_bar(remaining_s: int, total_s: int = 30, width: int = 16) ->
     fraction = max(0.0, min(1.0, remaining_s / max(1, total_s)))
     filled = int(fraction * width)
     empty = width - filled
-    bar = "█" * filled + "░" * empty
+    bar = "█" * filled + "-" * empty
     pct = int(fraction * 100)
     return f"Expires in {remaining_s}s [{bar}] {pct}%"

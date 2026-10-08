@@ -12,8 +12,13 @@ from tg_cli.commands import Command
 from tg_cli.domain.models import Account
 from tg_cli.telegram.fake import FakeGateway
 from tg_cli.telegram.gateway import Gateway
+from tg_cli.domain.render import apply_terminal_cell_width
+from tg_cli.ui.clipboard import copy_text
 from tg_cli.ui.screens.accounts import AccountsScreen
 from tg_cli.ui.screens.chats import ChatsScreen
+
+# Screen imports pull Textual in before the width patch runs inside render.
+apply_terminal_cell_width()
 
 
 class TelegramCLIApp(App[None]):
@@ -62,7 +67,18 @@ class TelegramCLIApp(App[None]):
             self.screen.action_toggle_qr_mode()
 
     def action_handle_ctrl_c(self) -> None:
-        """Cancel in-flight action; second Ctrl+C within 1.0s quits."""
+        """Copy a text selection. With nothing selected, second Ctrl+C within 1s quits."""
+        selected = ""
+        try:
+            selected = self.screen.get_selected_text() or ""
+        except Exception:
+            selected = ""
+        if selected.strip():
+            if copy_text(self, selected):
+                status = getattr(self.screen, "status_bar", None)
+                if status is not None and hasattr(status, "set_status"):
+                    status.set_status("Copied.")
+            return
         now = time.time()
         if now - self._last_ctrl_c_time <= 1.0:
             self.exit()

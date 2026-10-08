@@ -9,6 +9,7 @@ from typing import Any
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.dom import NoScreen
 from textual.events import Key, Paste
 from textual.message import Message as TextualMessage
 from textual.widget import Widget
@@ -17,6 +18,17 @@ from textual.widgets import Static, TextArea
 
 class ComposerInput(TextArea):
     """Subclass of TextArea to give Composer strict control over keys."""
+
+    def check_consume_key(self, key: str, character: str | None = None) -> bool:
+        """Leave z/Z for message expand unless the user is actually typing."""
+        if key in ("z", "Z"):
+            try:
+                writing = bool(getattr(self.screen, "is_write_mode", False))
+            except NoScreen:
+                writing = False
+            if not writing:
+                return False
+        return super().check_consume_key(key, character)
 
     def on_key(self, event: Key) -> None:
         composer = self.parent

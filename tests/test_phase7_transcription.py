@@ -169,6 +169,7 @@ async def test_transcription_failure_and_retry():
 
 def test_gemini_transcriber_missing_key(monkeypatch, tmp_path):
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr("tg_cli.config._load_dotenv_if_exists", lambda: None)
     fake_config = tmp_path / "config.json"
     fake_config.write_text("{}", encoding="utf-8")
     monkeypatch.setattr("tg_cli.config.get_config_path", lambda: fake_config)

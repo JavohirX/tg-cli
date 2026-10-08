@@ -4,6 +4,7 @@ Defensive attribute access allows testing without live Telethon sessions.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 from tg_cli.domain.models import (
@@ -52,8 +53,142 @@ def determine_chat_kind(entity: Any) -> ChatKind:
     return ChatKind.USER
 
 
+# Verbs for Telegram service actions. The class name without the
+# "MessageAction" prefix is the key. Unknown actions are humanized so the
+# row is never a name with an empty body.
+_SERVICE_VERBS = {
+    "PinMessage": "pinned a message",
+    "ChatJoinedByLink": "joined the group",
+    "ChatJoinedByRequest": "joined the group",
+    "ChatEditPhoto": "changed the group photo",
+    "ChatDeletePhoto": "removed the group photo",
+    "HistoryClear": "cleared the chat history",
+    "ScreenshotTaken": "took a screenshot",
+    "ContactSignUp": "joined Telegram",
+    "BotAllowed": "allowed the bot to message",
+    "SetChatTheme": "changed the chat theme",
+    "SetMessagesTTL": "changed the auto-delete timer",
+    "GroupCall": "started a group call",
+    "InviteToGroupCall": "invited someone to the call",
+    "BoostApply": "boosted the chat",
+    "GiftPremium": "gifted Telegram Premium",
+    "SuggestProfilePhoto": "suggested a photo",
+    "WebViewDataSent": "sent web app data",
+    "PaymentSent": "sent a payment",
+    "GiveawayLaunch": "started a giveaway",
+    "StarGift": "sent a gift",
+    "RequestedPeer": "shared a chat",
+    "ChatMigrateTo": "migrated the chat to a supergroup",
+    "ChannelMigrateFrom": "migrated the chat from a group",
+    "TopicEdit": "edited a topic",
+    "SetChatWallPaper": "changed the wallpaper",
+    "ConferenceCall": "started a call",
+    "GeoProximityReached": "is nearby",
+    "GroupCallScheduled": "scheduled a group call",
+}
+
+
+def _humanize_action(key: str) -> str:
+    parts = re.findall(r"[A-Z]+(?![a-z])|[A-Z][a-z]*|\d+", key)
+    text = " ".join(parts).strip().lower()
+    return text or "sent a service message"
+
+
+def describe_service_action(action: Any, *, sender_id: int = 0) -> str:
+    """Plain sentence for a Telegram service action, without the actor's name."""
+    key = type(action).__name__.removeprefix("MessageAction")
+    if key == "ChatAddUser":
+        users = list(getattr(action, "users", None) or [])
+        if len(users) > 1:
+            return f"added {len(users)} members"
+        return "added a member"
+    if key == "ChatDeleteUser":
+        user_id = int(getattr(action, "user_id", 0) or 0)
+        if sender_id and user_id == sender_id:
+            return "left the group"
+        return "removed a member"
+    if key == "ChatEditTitle":
+        title = str(getattr(action, "title", "") or "").strip()
+        return f"changed the name to {title}" if title else "changed the group name"
+    if key == "ChatCreate":
+        title = str(getattr(action, "title", "") or "").strip()
+        return f"created the group {title}".strip()
+    if key == "ChannelCreate":
+        title = str(getattr(action, "title", "") or "").strip()
+        return f"created the channel {title}".strip()
+    if key == "CustomAction":
+        return str(getattr(action, "message", "") or "").strip() or "sent a service message"
+    if key == "TopicCreate":
+        title = str(getattr(action, "title", "") or "").strip()
+        return f"created the topic {title}".strip()
+    if key == "PhoneCall":
+        reason = getattr(action, "reason", None)
+        reason_name = type(reason).__name__ if reason is not None else ""
+        if "Miss" in reason_name or "Busy" in reason_name:
+            return "missed a call"
+        if getattr(action, "duration", None):
+            return "finished a call"
+        return "started a call"
+    if key == "GameScore":
+        score = getattr(action, "score", None)
+        return f"scored {score}" if score is not None else "scored in a game"
+    if key in _SERVICE_VERBS:
+        return _SERVICE_VERBS[key]
+    return _humanize_action(key)
+
+
+def service_sentence(sender_name: str, verb: str) -> str:
+    """Join the actor and the verb. Skip a missing name so the row is not blank."""
+    verb = (verb or "").strip() or "sent a service message"
+    name = (sender_name or "").strip()
+    if not name or name == "Unknown":
+        return verb
+    if verb.lower().startswith(name.lower()):
+        return verb
+    return f"{name} {verb}"
+
+
+def member_role(participant: Any) -> str:
+    """Return "owner", "admin", or "" from a Telethon participant object."""
+    if participant is None:
+        return ""
+    name = type(participant).__name__
+    if "Creator" in name:
+        return "owner"
+    if "Admin" in name:
+        return "admin"
+    return ""
+
+
+def _message_sender_name(msg: Any) -> str:
+    sender = getattr(msg, "sender", None)
+    sender_name = ""
+    if sender:
+        first = str(getattr(sender, "first_name", "") or "")
+        last = str(getattr(sender, "last_name", "") or "")
+        sender_name = (
+            f"{first} {last}".strip()
+            or str(getattr(sender, "title", "") or "")
+            or str(getattr(sender, "username", "") or "")
+        )
+    if not sender_name:
+        sender_id = int(getattr(msg, "sender_id", 0) or 0)
+        if getattr(msg, "out", False):
+            sender_name = "Me"
+        elif sender_id:
+            sender_name = str(sender_id)
+        else:
+            sender_name = "Unknown"
+    return sender_name
+
+
 def determine_message_kind(msg: Any) -> tuple[MessageKind, str]:
     """Determine MessageKind and preview/placeholder text from Telethon Message."""
+    action = getattr(msg, "action", None)
+    if action is not None:
+        sender_id = int(getattr(msg, "sender_id", 0) or 0)
+        return (MessageKind.SERVICE, describe_service_action(action, sender_id=sender_id))
+
     media = getattr(msg, "media", None)
     if media is None:
         return (MessageKind.TEXT, getattr(msg, "message", "") or "")
@@ -140,6 +275,8 @@ def map_telethon_dialog_to_chat(dialog: Any, account_id: int) -> Chat:
         kind_type, text = determine_message_kind(msg)
         if kind_type == MessageKind.TEXT:
             last_preview = getattr(msg, "message", "") or ""
+        elif kind_type == MessageKind.SERVICE:
+            last_preview = service_sentence(_message_sender_name(msg), text)
         else:
             last_preview = f"[{kind_type.value}] {text}".strip()
 
@@ -162,15 +299,7 @@ def map_telethon_message_to_domain(msg: Any, account_id: int, chat_id: int) -> M
     """Map a Telethon Message to a Message domain model."""
     msg_id = int(getattr(msg, "id", 0))
     sender_id = int(getattr(msg, "sender_id", 0) or 0)
-
-    sender = getattr(msg, "sender", None)
-    sender_name = ""
-    if sender:
-        f_name = getattr(sender, "first_name", "") or ""
-        l_name = getattr(sender, "last_name", "") or ""
-        sender_name = f"{f_name} {l_name}".strip() or getattr(sender, "title", "") or getattr(sender, "username", "")
-    if not sender_name:
-        sender_name = "Me" if getattr(msg, "out", False) else (str(sender_id) if sender_id else "Unknown")
+    sender_name = _message_sender_name(msg)
 
     date = getattr(msg, "date", None)
     if date and date.tzinfo is None:
@@ -179,7 +308,9 @@ def map_telethon_message_to_domain(msg: Any, account_id: int, chat_id: int) -> M
     kind, preview = determine_message_kind(msg)
     plain_text = getattr(msg, "message", "") or ""
     caption = ""
-    if kind != MessageKind.TEXT:
+    if kind == MessageKind.SERVICE:
+        plain_text = service_sentence(sender_name, preview)
+    elif kind != MessageKind.TEXT:
         caption = plain_text
         plain_text = f"[{kind.value}] {preview}".strip()
 

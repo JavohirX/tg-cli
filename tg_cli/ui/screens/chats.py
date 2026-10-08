@@ -159,6 +159,7 @@ class ChatsScreen(Screen):
             is_cursor=is_cursor,
             is_selected=is_selected,
             is_archive_header=is_archive_header,
+            has_selection=bool(self.chat_list.selected_ids),
         )
 
     def refresh_chats(self, initial: bool = False) -> None:
@@ -199,6 +200,9 @@ class ChatsScreen(Screen):
 
     def on_windowed_list_item_activated(self, event: WindowedList.ItemActivated) -> None:
         self._open_chat(event.item)
+
+    def on_windowed_list_text_copied(self, event: WindowedList.TextCopied) -> None:
+        self.status_bar.set_status("Copied.")
 
     def _open_chat(self, chat: Chat) -> None:
         if chat.chat_id == ARCHIVE_CHAT_ID:
@@ -560,14 +564,18 @@ class ChatsScreen(Screen):
         if self.chat_list.clear_selection():
             return
 
-        # 4. Folder archive view -> return to All folders
+        # 4. Dragged text
+        if self.chat_list.clear_text_selection():
+            return
+
+        # 5. Folder archive view -> return to All folders
         if self.current_folder_id == -2:
             self.current_folder_id = None
             self.folder_strip.set_folders(self.folders, active_folder_id=None)
             self.refresh_chats(initial=True)
             return
 
-        # 5. Return to accounts screen
+        # 6. Return to accounts screen
         self.app.pop_screen()
 
     def action_show_help(self) -> None:

@@ -315,6 +315,9 @@ class FakeGateway:
             ),
         ]
 
+        # sender_id -> "admin" | "owner", keyed by (account_id, chat_id)
+        self.member_roles: dict[tuple[int, int], dict[int, str]] = {}
+
         # Seed profile for Alice
         self.profiles[alice_id] = UserProfile(
             user_id=alice_id,
@@ -412,6 +415,14 @@ class FakeGateway:
     def get_chat(self, account_id: int, chat_id: int) -> Chat | None:
         return self.chats.get(account_id, {}).get(chat_id)
 
+    def request_member_roles(self, account_id: int, chat_id: int) -> None:
+        roles = dict(self.member_roles.get((account_id, chat_id), {}))
+        self._emit("roles_changed", {
+            "user_id": account_id,
+            "chat_id": chat_id,
+            "roles": roles,
+        })
+
     def get_messages(
         self,
         account_id: int,
@@ -448,6 +459,19 @@ class FakeGateway:
                 if q in m.plain_text.lower() or q in m.sender_name.lower()
             ]
         return filtered[-limit:]
+
+    def get_message(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_id: int,
+    ) -> Message | None:
+        key = (account_id, chat_id)
+        msgs = self.messages.get(key, [])
+        for m in msgs:
+            if m.message_id == message_id:
+                return m
+        return None
 
     def send_message(
         self,

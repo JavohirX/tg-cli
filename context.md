@@ -1358,3 +1358,86 @@ The goal is to produce a specification that another engineering agent could use 
 
 
 
+
+
+---
+
+# Session Summary & Continuation Context (Date: 2026-10-07)
+
+## 1. Overview & Context
+This session focused on fixing column misalignments in the chat list, adjusting timestamps to the user's local system clock, implementing quoted replies in the message view, and diagnosing/solving the root cause of emoji-induced layout drift on Windows.
+
+---
+
+## 2. Key Features & Fixes Implemented
+
+### A. Local System Clock Adjustment
+- **Problem**: Message and chat timestamps were rendered in raw UTC (`+00:00`).
+- **Fix**: Added `to_local_datetime()` in `tg_cli/domain/render.py` using `.astimezone()` to automatically adjust datetimes to the user's local system timezone. Naive datetimes from Telethon are localized cleanly.
+
+### B. Quoted Message Duplication (`>` prefix)
+- **Problem**: When a message was a reply to another message, it only showed a small generic label `↳ reply to #id`.
+- **Fix**: In `render_message()` (`tg_cli/domain/render.py`), when `replied_message` is provided, the message body is duplicated, indented, prefixed with `> [Sender Name]: [Body]`, and styled in dim cyan, matching terminal email/quote conventions. Falls back gracefully if the message is uncached.
+
+### C. Restricted Preview Panel & Dynamic Space Padding
+- **Problem**: Previews extended directly up to the timestamp, causing previews with emojis or media tags (`[photo]`, `[file]`) to visually collide with and push the timestamp rightward.
+- **Fix**:
+  - Implemented user-suggested panel restriction: `preview_max_width = max(6, total_middle - title_width - buffer_gap)`, reserving a guaranteed whitespace buffer before the right columns.
+  - Appended dynamic space padding `line.append(" " * pad_needed)` so all variable blank space is filled with spaces.
+  - Hours column (`time_width = 5`) and unread badge (`unread_width = 5`) are rigidly anchored to the exact right edge of the window.
+
+### D. The Emoji & Chat Title Width Drift Mystery (Root Cause & Solution)
+- **User Discovery**: 
+  - 3 prayer hands (`🙏🙏🙏`) in previews or emojis in chat names (`Mom ❤️`, `Crypto 🚀`) caused timestamps to shift rightward or leftward across different rows despite lots of spaces between them.
+  - Realized that **chat titles and UI kind glyphs** also contain emojis and symbols, which were compounding the misalignment across the entire row from left to right.
+- **Root Cause Identified via Windows Console API**:
+  - In terminal emulators, there are no fixed horizontal coordinates in a line string. A row is drawn sequentially:
+    `[Prefix] -> [Glyph] -> [Title] -> [Preview] -> [Spaces] -> [Time] -> [Unread]`
+  - If the terminal font rasterizer and Python's cell-width engine disagree by even 1 cell on any emoji, that error offsets the cursor before spaces are drawn, pushing everything to the right of it.
+  - Probed the live Windows console via `CONOUT$` and `GetConsoleScreenBufferInfo`:
+    - Classic **Windows Console Host (`conhost.exe` / `cmd.exe` / classic PowerShell)** advances the cursor by **1 CELL** for SMP emojis (`🙏`, `🚀`, `👤`, `📢`).
+    - BMP presentation emojis (`❤️`, `⚡`, `⭐`) advance by **2 CELLS**.
+    - Modern terminals (Windows Terminal `wt.exe`, VS Code) advance by **2 CELLS** for all emojis.
+- **User Discovery & Bug Report**: 
+  - User reported that replacing the chat type markings broke the aesthetic ("it actually broke everything, the problem is not our marking of that chat type, bring that back").
+  - The real culprit was chat names with compound emojis like `"students 👨‍🎓"` or `"students 👩‍🎓"`, which broke the message preview offset and consequently the timing alignment.
+- **Root Cause Identified (ZWJ Compound Emojis Mismatch)**:
+  - The student emoji `👨‍🎓` is a Zero-Width Joiner (ZWJ) sequence: Man (`👨`) + ZWJ (`\u200d`) + Graduation Cap (`🎓`).
+  - Our custom cluster width calculation was treating the whole sequence as **1 cell**.
+  - Meanwhile, Rich and Textual's layout engine (`cell_len`) calculates each emoji component separately: $2 + 0 + 2 = \mathbf{4\text{ cells}}$.
+  - Because our code undercounted the title by 3 cells, it added 3 extra spaces of padding into the title column!
+  - This pushed the preview column from column 27 to column 30, and pushed the timestamp column from column 69 to column 72!
+- **Solution Implemented**:
+  1. **Restored Original Chat Glyphs**:
+     - Kind glyphs restored to: User (`👤`), Channel (`📢`), Group (`👥`), Bot (`🤖`).
+     - Status icons restored to: Pinned (`📌`), Muted (`🔇`).
+  2. **Harmonized cell_width with Rich/Textual (`cell_len`)**:
+     - Switched `cell_width(text)` to delegate directly to `cell_len(text)`.
+     - Ensures 100% synchronization between our title/preview space padding and Textual's widget layout engine.
+     - Titles with compound student emojis (`students 🎓`, `students 👨‍🎓`, `students 👩‍🎓`, `students 👥`, `Bob 🚀`, `Mom ❤️`) now start their preview at exactly column 27 and their timestamp at column 69 across all rows.
+
+---
+
+## 3. Verification & Test Suite Status
+- **Full Test Suite**: `py -3.12 -m pytest` -> **88 passed in 26.06s** (100% green).
+- **Domain Render Tests**: `py -3.12 -m pytest tests/test_domain_render.py` -> **17 passed in 0.22s**.
+- Added dedicated test `test_render_chat_row_student_emoji_titles_alignment` verifying preview and time column coordinates across all student emoji variants.
+
+---
+
+## 4. Key Files Modified
+- `tg_cli/domain/render.py`:
+  - `cell_width()` synchronized with `cell_len()` for 100% Textual layout agreement.
+  - `get_kind_glyph()` restored with `👤`, `📢`, `👥`, `🤖`.
+  - `status_icons` restored with `📌` and `🔇`.
+  - Panel restriction with `buffer_gap` and dynamic space padding.
+  - `format_time()` local timezone adjustment.
+  - `render_message()` quoted reply formatting.
+- `tests/test_domain_render.py`:
+  - Restored assertions for original glyphs (`👤`, `📢`, `👥`, `🤖`).
+  - Added test coverage for compound ZWJ student emojis in chat titles.
+
+---
+
+## 5. Next Steps for Continuation
+- Run the app via `run-fake.bat` (`py -3.12 -m tg_cli --fake`) or `run.bat` (`py -3.12 -m tg_cli`) to see the restored `👤`, `📢`, `👥`, `🤖`, `📌`, `🔇` icons with perfectly aligned preview and timing columns even on chats with student emojis (`students 👨‍🎓`).

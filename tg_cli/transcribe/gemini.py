@@ -16,7 +16,7 @@ class GeminiTranscriber:
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gemini-1.5-flash",
+        model: str = "gemini-3.8-flash",
         timeout: float = 30.0,
     ) -> None:
         self.api_key = api_key
@@ -39,7 +39,7 @@ class GeminiTranscriber:
 
     def transcribe_audio(self, audio_path: Path, model: str | None = None) -> str:
         api_key = self._resolve_api_key()
-        active_model = model or self.model or "gemini-1.5-flash"
+        active_model = model or self.model or "gemini-3.8-flash"
 
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")

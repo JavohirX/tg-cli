@@ -19,6 +19,8 @@ from tg_cli.domain.models import (
     AuthState,
     Chat,
     Folder,
+    Message,
+    SendState,
     SessionInfo,
     UserProfile,
 )
@@ -37,6 +39,7 @@ from tg_cli.telegram.map import (
     map_telethon_dialog_to_chat,
     map_telethon_message_to_domain,
     map_telethon_user_to_account,
+    member_role,
 )
 
 logger = logging.getLogger("tg_cli.worker")
@@ -169,6 +172,78 @@ class StopWorkerCmd(WorkerCommand):
     pass
 
 
+class FetchMessagesCmd(WorkerCommand):
+    def __init__(
+        self,
+        account_id: int,
+        chat_id: int,
+        limit: int = 50,
+        before_id: int | None = None,
+    ) -> None:
+        self.account_id = account_id
+        self.chat_id = chat_id
+        self.limit = limit
+        self.before_id = before_id
+
+
+class FetchRolesCmd(WorkerCommand):
+    def __init__(self, account_id: int, chat_id: int) -> None:
+        self.account_id = account_id
+        self.chat_id = chat_id
+
+
+class SendMessageCmd(WorkerCommand):
+    def __init__(
+        self,
+        account_id: int,
+        chat_id: int,
+        temp_msg_id: int,
+        text: str,
+        reply_to_id: int | None = None,
+    ) -> None:
+        self.account_id = account_id
+        self.chat_id = chat_id
+        self.temp_msg_id = temp_msg_id
+        self.text = text
+        self.reply_to_id = reply_to_id
+
+
+class EditMessageCmd(WorkerCommand):
+    def __init__(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_id: int,
+        text: str,
+    ) -> None:
+        self.account_id = account_id
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.text = text
+
+
+class DeleteMessagesCmd(WorkerCommand):
+    def __init__(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_ids: Sequence[int],
+    ) -> None:
+        self.account_id = account_id
+        self.chat_id = chat_id
+        self.message_ids = message_ids
+
+
+class MarkChatReadCmd(WorkerCommand):
+    def __init__(
+        self,
+        account_id: int,
+        chat_ids: Sequence[int],
+    ) -> None:
+        self.account_id = account_id
+        self.chat_ids = chat_ids
+
+
 class TelethonWorker(threading.Thread):
     """Thread running an isolated asyncio event loop for Telethon clients."""
 
@@ -251,6 +326,18 @@ class TelethonWorker(threading.Thread):
             await self._handle_update_profile(cmd)
         elif isinstance(cmd, DisconnectAccountCmd):
             await self._disconnect_client(cmd.user_id)
+        elif isinstance(cmd, FetchMessagesCmd):
+            await self._handle_fetch_messages(cmd)
+        elif isinstance(cmd, FetchRolesCmd):
+            await self._handle_fetch_roles(cmd)
+        elif isinstance(cmd, SendMessageCmd):
+            await self._handle_send_message(cmd)
+        elif isinstance(cmd, EditMessageCmd):
+            await self._handle_edit_message(cmd)
+        elif isinstance(cmd, DeleteMessagesCmd):
+            await self._handle_delete_messages(cmd)
+        elif isinstance(cmd, MarkChatReadCmd):
+            await self._handle_mark_chat_read(cmd)
 
     async def _handle_connect_accounts(self, cmd: ConnectAccountsCmd) -> None:
         for acc in cmd.accounts:
@@ -501,6 +588,248 @@ class TelethonWorker(threading.Thread):
             logger.warning(f"Error updating profile: {e}")
             cmd.result_queue.put(UserProfile(user_id=cmd.user_id, first_name="User"))
 
+    async def _handle_fetch_messages(self, cmd: FetchMessagesCmd) -> None:
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            self._emit("fetch_messages_done", {
+                "user_id": cmd.account_id,
+                "chat_id": cmd.chat_id,
+                "before_id": cmd.before_id,
+                "error": "Client not connected",
+            })
+            return
+
+        try:
+            entity = cmd.chat_id
+            try:
+                entity = await client.get_input_entity(cmd.chat_id)
+            except Exception:
+                try:
+                    entity = await client.get_entity(cmd.chat_id)
+                except Exception:
+                    entity = cmd.chat_id
+
+            messages: list[Message] = []
+            offset_id = cmd.before_id if cmd.before_id is not None else 0
+            async for m in client.iter_messages(entity, limit=cmd.limit, offset_id=offset_id):
+                if m:
+                    try:
+                        domain_m = map_telethon_message_to_domain(m, cmd.account_id, cmd.chat_id)
+                        messages.append(domain_m)
+                    except Exception as e:
+                        logger.warning(f"Error mapping message {getattr(m, 'id', None)}: {e}")
+
+            if messages:
+                chat = repo_get_chat(self.conn, cmd.account_id, cmd.chat_id)
+                if not chat:
+                    upsert_chats(
+                        self.conn,
+                        [Chat(account_id=cmd.account_id, chat_id=cmd.chat_id, title=f"Chat {cmd.chat_id}")],
+                    )
+
+                upsert_messages(self.conn, messages)
+
+                if cmd.before_id is None:
+                    newest = max(messages, key=lambda x: x.message_id)
+                    chat = repo_get_chat(self.conn, cmd.account_id, cmd.chat_id)
+                    if chat:
+                        chat.last_message_id = newest.message_id
+                        chat.last_date = newest.date
+                        chat.last_preview = newest.plain_text or f"[{newest.kind.value}]"
+                        upsert_chats(self.conn, [chat])
+                    self._emit("chats_changed", {"user_id": cmd.account_id})
+
+                self._emit("messages_changed", {
+                    "user_id": cmd.account_id,
+                    "chat_id": cmd.chat_id,
+                    "count": len(messages),
+                    "before_id": cmd.before_id,
+                })
+            elif cmd.before_id is not None:
+                self._emit("status", {
+                    "message": "Beginning of history reached.",
+                    "is_error": False,
+                })
+        except errors.FloodWaitError as e:
+            self._emit("status", {"message": f"Rate limited: wait {e.seconds}s", "is_error": True})
+        except Exception as e:
+            logger.warning(f"Error fetching messages for chat {cmd.chat_id}: {type(e).__name__}: {e}")
+        finally:
+            self._emit("fetch_messages_done", {
+                "user_id": cmd.account_id,
+                "chat_id": cmd.chat_id,
+                "before_id": cmd.before_id,
+            })
+
+    async def _handle_fetch_roles(self, cmd: FetchRolesCmd) -> None:
+        """Load owner and admin ids for a group or channel."""
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            self._emit("roles_changed", {
+                "user_id": cmd.account_id,
+                "chat_id": cmd.chat_id,
+                "roles": {},
+                "error": True,
+            })
+            return
+        try:
+            roles = await self._load_member_roles(client, cmd.chat_id)
+            self._emit("roles_changed", {
+                "user_id": cmd.account_id,
+                "chat_id": cmd.chat_id,
+                "roles": roles,
+            })
+        except Exception as e:
+            logger.warning(f"Error fetching roles for chat {cmd.chat_id}: {type(e).__name__}: {e}")
+            self._emit("roles_changed", {
+                "user_id": cmd.account_id,
+                "chat_id": cmd.chat_id,
+                "roles": {},
+                "error": True,
+            })
+
+    async def _load_member_roles(self, client: TelegramClient, chat_id: int) -> dict[int, str]:
+        from telethon.tl.types import ChannelParticipantsAdmins
+
+        entity: Any = chat_id
+        try:
+            entity = await client.get_input_entity(chat_id)
+        except Exception:
+            try:
+                entity = await client.get_entity(chat_id)
+            except Exception:
+                entity = chat_id
+
+        try:
+            users = await client.get_participants(
+                entity, filter=ChannelParticipantsAdmins(), limit=200
+            )
+        except Exception:
+            kind_name = type(entity).__name__
+            # A failed admin filter on a channel must not page every member.
+            if "Channel" in kind_name:
+                raise
+            users = await client.get_participants(entity, limit=200)
+
+        roles: dict[int, str] = {}
+        for user in users:
+            role = member_role(getattr(user, "participant", None))
+            user_id = getattr(user, "id", None)
+            if role and user_id:
+                roles[int(user_id)] = role
+        return roles
+
+    async def _handle_send_message(self, cmd: SendMessageCmd) -> None:
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE messages SET send_state = ? WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                    (SendState.FAILED.value, cmd.account_id, cmd.chat_id, cmd.temp_msg_id),
+                )
+            self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
+            return
+
+        try:
+            entity = cmd.chat_id
+            try:
+                entity = await client.get_input_entity(cmd.chat_id)
+            except Exception:
+                try:
+                    entity = await client.get_entity(cmd.chat_id)
+                except Exception:
+                    entity = cmd.chat_id
+
+            reply_to = cmd.reply_to_id if (cmd.reply_to_id and cmd.reply_to_id > 0) else None
+            sent = await client.send_message(entity, cmd.text, reply_to=reply_to)
+
+            # Physically remove optimistic queued placeholder
+            with self.conn:
+                self.conn.execute(
+                    "DELETE FROM messages WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                    (cmd.account_id, cmd.chat_id, cmd.temp_msg_id),
+                )
+
+            mapped = map_telethon_message_to_domain(sent, cmd.account_id, cmd.chat_id)
+            upsert_messages(self.conn, [mapped])
+
+            chat = repo_get_chat(self.conn, cmd.account_id, cmd.chat_id)
+            if chat:
+                chat.last_message_id = mapped.message_id
+                chat.last_date = mapped.date
+                chat.last_preview = mapped.plain_text
+                upsert_chats(self.conn, [chat])
+
+            self._emit("chats_changed", {"user_id": cmd.account_id})
+            self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
+        except Exception as e:
+            logger.warning(f"Failed to send message: {type(e).__name__}: {e}")
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE messages SET send_state = ? WHERE account_id = ? AND chat_id = ? AND message_id = ?",
+                    (SendState.FAILED.value, cmd.account_id, cmd.chat_id, cmd.temp_msg_id),
+                )
+            self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
+            self._emit("status", {"message": f"Send failed: {type(e).__name__}", "is_error": True})
+
+    async def _handle_edit_message(self, cmd: EditMessageCmd) -> None:
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            return
+        try:
+            entity = cmd.chat_id
+            try:
+                entity = await client.get_input_entity(cmd.chat_id)
+            except Exception:
+                try:
+                    entity = await client.get_entity(cmd.chat_id)
+                except Exception:
+                    entity = cmd.chat_id
+
+            edited = await client.edit_message(entity, cmd.message_id, cmd.text)
+            if edited:
+                mapped = map_telethon_message_to_domain(edited, cmd.account_id, cmd.chat_id)
+                upsert_messages(self.conn, [mapped])
+                self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
+        except Exception as e:
+            logger.warning(f"Failed to edit message: {type(e).__name__}: {e}")
+            self._emit("status", {"message": f"Edit failed: {type(e).__name__}", "is_error": True})
+
+    async def _handle_delete_messages(self, cmd: DeleteMessagesCmd) -> None:
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            return
+        try:
+            entity = cmd.chat_id
+            try:
+                entity = await client.get_input_entity(cmd.chat_id)
+            except Exception:
+                try:
+                    entity = await client.get_entity(cmd.chat_id)
+                except Exception:
+                    entity = cmd.chat_id
+
+            await client.delete_messages(entity, list(cmd.message_ids))
+            delete_messages(self.conn, cmd.account_id, cmd.chat_id, cmd.message_ids)
+            self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
+        except Exception as e:
+            logger.warning(f"Failed to delete messages: {type(e).__name__}: {e}")
+            self._emit("status", {"message": f"Delete failed: {type(e).__name__}", "is_error": True})
+
+    async def _handle_mark_chat_read(self, cmd: MarkChatReadCmd) -> None:
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            return
+        try:
+            for cid in cmd.chat_ids:
+                try:
+                    entity = await client.get_input_entity(cid)
+                except Exception:
+                    entity = cid
+                await client.send_read_acknowledge(entity)
+        except Exception as e:
+            logger.warning(f"Failed to acknowledge read for chat: {type(e).__name__}: {e}")
+
     async def _finish_login(self, user: Any) -> None:
         user_id = int(getattr(user, "id", 0))
         final_session = get_session_path(user_id)
@@ -508,11 +837,19 @@ class TelethonWorker(threading.Thread):
         # Move/save to final session path
         if self._login_client:
             await self._login_client.disconnect()
+            if hasattr(self._login_client.session, "close"):
+                try:
+                    self._login_client.session.close()
+                except Exception:
+                    pass
             temp_session_file = get_session_path("temp_login").with_suffix(".session")
             final_session_file = final_session.with_suffix(".session")
             if temp_session_file.exists():
                 if final_session_file.exists():
-                    final_session_file.unlink()
+                    try:
+                        final_session_file.unlink()
+                    except Exception:
+                        pass
                 temp_session_file.rename(final_session_file)
 
         # Reopen with final session path and store
@@ -586,6 +923,7 @@ class TelethonWorker(threading.Thread):
         """Paging dialog sync without blocking UI."""
         self._emit("status", {"message": "syncing dialogs...", "is_error": False})
         batch: list[Chat] = []
+        msg_batch: list[Message] = []
         try:
             async for dialog in client.iter_dialogs(limit=None):
                 chat = map_telethon_dialog_to_chat(dialog, user_id)
@@ -594,14 +932,27 @@ class TelethonWorker(threading.Thread):
                     chat.folder_ids.add(folder_id)
                 batch.append(chat)
 
+                if dialog.message:
+                    try:
+                        m = map_telethon_message_to_domain(dialog.message, user_id, chat.chat_id)
+                        msg_batch.append(m)
+                    except Exception:
+                        pass
+
                 if len(batch) >= 100:
                     upsert_chats(self.conn, batch)
+                    if msg_batch:
+                        upsert_messages(self.conn, msg_batch)
+                        msg_batch.clear()
                     self._emit("chats_changed", {"user_id": user_id, "count": len(batch)})
                     batch.clear()
                     await asyncio.sleep(0.01)
 
             if batch:
                 upsert_chats(self.conn, batch)
+                if msg_batch:
+                    upsert_messages(self.conn, msg_batch)
+                    msg_batch.clear()
                 self._emit("chats_changed", {"user_id": user_id, "count": len(batch)})
 
             self._emit("status", {"message": "ready", "is_error": False})
@@ -646,17 +997,11 @@ class TelethonWorker(threading.Thread):
         if self._login_client:
             try:
                 await self._login_client.disconnect()
+                if hasattr(self._login_client.session, "close"):
+                    self._login_client.session.close()
             except Exception:
                 pass
             self._login_client = None
-        self._login_phone = ""
-        self._login_phone_code_hash = ""
-        temp_file = get_session_path("temp_login").with_suffix(".session")
-        if temp_file.exists():
-            try:
-                temp_file.unlink()
-            except Exception:
-                pass
         self._login_phone = ""
         self._login_phone_code_hash = ""
         temp_file = get_session_path("temp_login").with_suffix(".session")

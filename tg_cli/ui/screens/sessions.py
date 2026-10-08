@@ -15,6 +15,7 @@ from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Static
 from tg_cli.domain.models import Account, SessionInfo
+from tg_cli.domain.render import cell_width, to_local_datetime, truncate_to_width
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import FooterBar, StatusBar
 from tg_cli.ui.window import WindowedList
@@ -99,20 +100,26 @@ class SessionsScreen(Screen):
         cursor_prefix = "> " if is_cursor else "  "
         line.append(cursor_prefix, style="bold cyan" if is_cursor else "default")
 
-        # Device & platform
-        title = session.title
-        line.append(f"{title:<26} ", style="bold white" if is_cursor else "white")
+        # Device & platform (strictly 26 cells)
+        title = truncate_to_width(session.title, 26)
+        pad_title = max(0, 26 - cell_width(title))
+        line.append(title + (" " * pad_title) + " ", style="bold white" if is_cursor else "white")
 
-        # Location & IP
+        # Location & IP (strictly 28 cells)
         loc_str = f"{session.country} ({session.ip})" if (session.country or session.ip) else ""
-        line.append(f"{loc_str:<28} ", style="dim")
+        loc_clean = truncate_to_width(loc_str, 28)
+        pad_loc = max(0, 28 - cell_width(loc_clean))
+        line.append(loc_clean + (" " * pad_loc) + " ", style="dim")
 
-        # Last active date
+        # Last active date (strictly 18 cells, adjusted to local system clock)
         if session.date_active:
-            dt_str = session.date_active.strftime("%Y-%m-%d %H:%M")
+            local_dt = to_local_datetime(session.date_active)
+            dt_str = local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else "recently"
         else:
             dt_str = "recently"
-        line.append(f"{dt_str:<18} ", style="dim italic")
+        dt_clean = truncate_to_width(dt_str, 18)
+        pad_dt = max(0, 18 - cell_width(dt_clean))
+        line.append(dt_clean + (" " * pad_dt) + " ", style="dim italic")
 
         # Current session badge
         if session.is_current:

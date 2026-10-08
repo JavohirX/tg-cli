@@ -453,7 +453,9 @@ async def test_chats_screen_instant_account_switching():
 
 
 @pytest.mark.asyncio
-async def test_chats_palette_proxy_and_sessions():
+async def test_chats_palette_proxy_and_sessions(tmp_path, monkeypatch):
+    fake_config = tmp_path / "config.json"
+    monkeypatch.setattr("tg_cli.config.get_config_path", lambda: fake_config)
     gw = FakeGateway(chat_count=10)
     app = TelegramCLIApp(gateway=gw)
     async with app.run_test() as pilot:

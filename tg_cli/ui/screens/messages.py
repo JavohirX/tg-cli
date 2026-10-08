@@ -11,16 +11,18 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 from rich.console import Group, RenderableType
 from rich.text import Text
+from textual.actions import SkipAction
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical
-from textual.events import Key
+from textual.events import DescendantFocus, Key
 from textual.screen import Screen
 from textual.widgets import Input, Static
 from pathlib import Path
 from tg_cli.domain.models import (
     Account,
     Chat,
+    ChatKind,
     DateSeparator,
     Draft,
     Message,
@@ -29,9 +31,15 @@ from tg_cli.domain.models import (
     Transcript,
     UnreadDivider,
 )
-from tg_cli.domain.render import format_date_separator, render_message
+from tg_cli.domain.render import (
+    format_date_separator,
+    message_bundle_flags,
+    render_message,
+    sender_header_flags,
+)
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import FooterBar, StatusBar
+from tg_cli.ui.clipboard import copy_text
 from tg_cli.ui.composer import Composer
 from tg_cli.ui.window import WindowedList
 
@@ -77,7 +85,7 @@ class MessagesScreen(Screen):
         Binding("t", "transcribe_focused", "Transcribe", show=False),
         Binding("T", "retranscribe_focused", "Re-transcribe", show=False),
         Binding("y", "yank_focused", "Copy Text", show=False),
-        Binding("z", "toggle_expand", "Expand/Collapse", show=False),
+        Binding("z,Z", "toggle_expand", "Expand/Collapse", show=False, priority=True),
         Binding("?", "show_help", "Help", show=False),
         Binding("f1", "show_help", "Help", show=False),
         Binding("ctrl+k", "show_palette", "Palette", show=False),
@@ -98,6 +106,11 @@ class MessagesScreen(Screen):
         self.expanded_message_ids: set[int] = set()
 
         self._all_messages: list[Message] = []
+        self._message_cache: dict[int, Message] = {}
+        self._show_sender: dict[int, bool] = {}
+        self._show_time: dict[int, bool] = {}
+        self._gap_after: dict[int, bool] = {}
+        self._member_roles: dict[int, str] = {}
         self._is_loading_older: bool = False
         self._unseen_count: int = 0
         self.search_query: str = ""
@@ -114,6 +127,7 @@ class MessagesScreen(Screen):
             renderer=self._render_row_item,
             id_fn=lambda item: item.identity,
             is_selectable_fn=lambda item: isinstance(item, Message),
+            item_height_fn=self._get_item_height,
             id="message-window-list",
             enable_digit_motion=False,
         )
@@ -133,10 +147,16 @@ class MessagesScreen(Screen):
         self._update_header()
         self.refresh_messages(initial=True)
         self.message_list.focus()
+        self.call_after_refresh(self._scroll_to_latest)
 
         # Listen for real-time messages from gateway
         if hasattr(self.gateway, "register_listener"):
             self.gateway.register_listener(self._on_gateway_event)
+
+        if not self._is_direct_chat():
+            request_roles = getattr(self.gateway, "request_member_roles", None)
+            if request_roles is not None:
+                request_roles(self.account.user_id, self.chat.chat_id)
 
         # Mark chat as read initially
         self.gateway.mark_chats_read(self.account.user_id, [self.chat.chat_id], read=True)
@@ -148,7 +168,7 @@ class MessagesScreen(Screen):
             if draft.edit_message_id is not None:
                 self.composer.set_edit_context(draft.edit_message_id, draft.text)
             elif draft.reply_to_id is not None:
-                reply_msg = next((m for m in self._all_messages if m.message_id == draft.reply_to_id), None)
+                reply_msg = self._get_replied_message(draft.reply_to_id)
                 sender = reply_msg.sender_name if reply_msg else f"#{draft.reply_to_id}"
                 prev = (reply_msg.plain_text or "") if reply_msg else ""
                 self.composer.set_reply_context(draft.reply_to_id, sender, prev)
@@ -177,6 +197,15 @@ class MessagesScreen(Screen):
             if event_type == "messages_changed":
                 if data.get("chat_id") == self.chat.chat_id:
                     self._handle_live_message_event()
+            elif event_type == "roles_changed":
+                if data.get("error") or data.get("chat_id") != self.chat.chat_id:
+                    return
+                roles: dict[int, str] = {}
+                for uid, role in (data.get("roles") or {}).items():
+                    if role in ("admin", "owner"):
+                        roles[int(uid)] = role
+                self._member_roles = roles
+                self.message_list.refresh()
             elif event_type == "status":
                 msg = data.get("message", "")
                 is_err = data.get("is_error", False)
@@ -236,7 +265,90 @@ class MessagesScreen(Screen):
 
             items.append(msg)
 
+        direct = self._is_direct_chat()
+        self._show_sender = sender_header_flags(items, direct=direct)
+        self._show_time, self._gap_after = message_bundle_flags(items)
         return items
+
+    def _is_direct_chat(self) -> bool:
+        """People and bots share the direct-message layout."""
+        return self.chat.kind in (ChatKind.USER, ChatKind.BOT)
+
+    def _message_layout(self, message: Message) -> tuple[bool, bool, bool]:
+        """Direct chats color by author. Groups name only the first of a run."""
+        direct = self._is_direct_chat()
+        show_sender = self._show_sender.get(message.message_id, not direct)
+        show_time = self._show_time.get(message.message_id, True)
+        return direct, show_sender, show_time
+
+    def _render_message_lines(
+        self,
+        item: Message,
+        width: int,
+        *,
+        is_cursor: bool = False,
+        is_selected: bool = False,
+    ) -> list[Text]:
+        """Render one message. A blank line follows only the last line of a bundle."""
+        expanded = item.message_id in self.expanded_message_ids
+        transcript_text = None
+        if item.kind == MessageKind.VOICE:
+            tr = self.gateway.get_transcript(self.account.user_id, self.chat.chat_id, item.message_id)
+            if tr:
+                transcript_text = tr.text if tr.text else f"[error: {tr.error}]"
+        replied_msg = self._get_replied_message(item.reply_id) if item.reply_id else None
+        direct, show_sender, show_time = self._message_layout(item)
+        role = "" if direct else self._member_roles.get(item.sender_id, "")
+        lines = render_message(
+            message=item,
+            width=width,
+            expanded=expanded,
+            transcript=transcript_text,
+            is_cursor=is_cursor,
+            is_selected=is_selected,
+            replied_message=replied_msg,
+            show_sender=show_sender,
+            direct=direct,
+            show_time=show_time,
+            role=role,
+        )
+        if self._gap_after.get(item.message_id, True):
+            lines.append(Text(""))
+        return lines
+
+    def _scroll_to_latest(self) -> None:
+        if self.message_list.items:
+            self.message_list.cursor = len(self.message_list.items) - 1
+            self.message_list._adjust_cursor_to_selectable(-1)
+            self.message_list._ensure_cursor_visible()
+            self.message_list.refresh()
+
+    def _get_replied_message(self, reply_id: int | None) -> Message | None:
+        if reply_id is None:
+            return None
+        if reply_id in self._message_cache:
+            return self._message_cache[reply_id]
+        for m in self._all_messages:
+            if m.message_id == reply_id:
+                self._message_cache[reply_id] = m
+                return m
+        if hasattr(self.gateway, "get_message"):
+            try:
+                msg = self.gateway.get_message(self.account.user_id, self.chat.chat_id, reply_id)
+                if msg:
+                    self._message_cache[reply_id] = msg
+                    return msg
+            except Exception:
+                pass
+        return None
+
+    def _get_item_height(self, item: Any) -> int:
+        if isinstance(item, (DateSeparator, UnreadDivider)):
+            return 1
+        if isinstance(item, Message):
+            width = max(10, getattr(self.message_list.size, "width", 80))
+            return max(1, len(self._render_message_lines(item, width)))
+        return 1
 
     def _render_row_item(
         self, item: Any, width: int, is_cursor: bool, is_selected: bool
@@ -252,17 +364,9 @@ class MessagesScreen(Screen):
             return text
 
         if isinstance(item, Message):
-            expanded = item.message_id in self.expanded_message_ids
-            transcript_text = None
-            if item.kind == MessageKind.VOICE:
-                tr = self.gateway.get_transcript(self.account.user_id, self.chat.chat_id, item.message_id)
-                if tr:
-                    transcript_text = tr.text if tr.text else f"[error: {tr.error}]"
-            lines = render_message(
-                message=item,
-                width=width,
-                expanded=expanded,
-                transcript=transcript_text,
+            lines = self._render_message_lines(
+                item,
+                width,
                 is_cursor=is_cursor,
                 is_selected=is_selected,
             )
@@ -286,6 +390,8 @@ class MessagesScreen(Screen):
             return
 
         self._all_messages = messages
+        for m in messages:
+            self._message_cache[m.message_id] = m
         items = self._build_stream_items(messages)
         self.message_list.set_items(items, keep_cursor=not initial and not jump_to_end)
 
@@ -297,7 +403,10 @@ class MessagesScreen(Screen):
             self._unseen_count = 0
             self._update_header()
 
-        self.status_bar.set_status(f"{len(messages)} messages loaded.")
+        if not messages and initial:
+            self.status_bar.set_status("Loading messages...")
+        else:
+            self.status_bar.set_status(f"{len(messages)} messages loaded.")
 
     def load_older_messages(self) -> None:
         """Page older messages when cursor hits the top."""
@@ -325,6 +434,8 @@ class MessagesScreen(Screen):
             if not new_older:
                 return
 
+            for m in older:
+                self._message_cache[m.message_id] = m
             prev_focused = self.message_list.get_focused_item()
             self._all_messages = new_older + self._all_messages
             new_items = self._build_stream_items(self._all_messages)
@@ -348,12 +459,23 @@ class MessagesScreen(Screen):
         self.load_older_messages()
 
     def on_windowed_list_cursor_moved(self, event: WindowedList.CursorMoved) -> None:
+        if self.is_write_mode:
+            self.is_write_mode = False
+            self.footer_bar.update_state(is_write_mode=False)
+
         if event.index >= len(self.message_list.items) - 2:
             if self._unseen_count > 0:
                 self._unseen_count = 0
                 self._update_header()
                 self.gateway.mark_chats_read(self.account.user_id, [self.chat.chat_id], read=True)
                 self.status_bar.set_status(f"{len(self._all_messages)} messages loaded.")
+
+    def on_windowed_list_clicked(self, event: WindowedList.Clicked) -> None:
+        if self.is_write_mode:
+            self._set_focus_mode(is_write=False)
+
+    def on_windowed_list_text_copied(self, event: WindowedList.TextCopied) -> None:
+        self.status_bar.set_status("Copied.")
 
     def action_toggle_focus(self) -> None:
         """Switch focus between list and composer."""
@@ -532,23 +654,132 @@ class MessagesScreen(Screen):
             return
         focused = self.message_list.get_focused_item()
         if focused is not None and isinstance(focused, Message):
-            try:
-                self.app.copy_to_clipboard(focused.plain_text)
+            if copy_text(self.app, focused.plain_text):
                 self.status_bar.set_status("Copied message text to clipboard.")
-            except Exception:
-                self.status_bar.set_status("Clipboard copy not supported by terminal environment.", is_error=True)
+            else:
+                self.status_bar.set_status("Clipboard copy failed.", is_error=True)
 
     def action_toggle_expand(self) -> None:
-        if self.is_write_mode:
+        """Expand the message that shows the hint, or collapse it again.
+
+        `z` and `Z` both toggle. While typing, the key is left for the composer.
+        """
+        if self.is_write_mode or self._pending_confirm is not None:
+            raise SkipAction()
+        target = self._message_to_expand()
+        if target is None:
+            self.status_bar.set_status("Nothing to expand.")
             return
+        self._toggle_message_expansion(target)
+
+    def _message_to_expand(self) -> Message | None:
+        """Focused message if it is clamped or open; else the nearest visible hint."""
         focused = self.message_list.get_focused_item()
-        if focused is not None and isinstance(focused, Message):
-            mid = focused.message_id
-            if mid in self.expanded_message_ids:
-                self.expanded_message_ids.remove(mid)
-            else:
-                self.expanded_message_ids.add(mid)
-            self.message_list.refresh()
+        if isinstance(focused, Message) and self._can_toggle_expand(focused):
+            return focused
+        best: Message | None = None
+        best_dist: int | None = None
+        cursor = self.message_list.cursor
+        for idx in self._visible_message_indexes():
+            item = self.message_list.items[idx]
+            if isinstance(item, Message) and self._shows_expand_hint(item):
+                dist = abs(idx - cursor)
+                if best_dist is None or dist < best_dist:
+                    best = item
+                    best_dist = dist
+        return best
+
+    def _can_toggle_expand(self, message: Message) -> bool:
+        if message.message_id in self.expanded_message_ids:
+            return True
+        return self._shows_expand_hint(message)
+
+    def _shows_expand_hint(self, message: Message) -> bool:
+        if message.message_id in self.expanded_message_ids:
+            return False
+        width = max(10, self.message_list.size.width or 0)
+        lines = self._render_message_lines(message, width)
+        return any("press 'z' to expand" in line.plain for line in lines)
+
+    def _visible_message_indexes(self) -> list[int]:
+        wl = self.message_list
+        viewport = max(1, wl.size.height)
+        found: list[int] = []
+        y = 0
+        for idx in range(wl.top_index, len(wl.items)):
+            height = wl._get_height(idx)
+            if idx == wl.top_index:
+                height = max(0, height - wl.top_skip)
+            if height <= 0:
+                continue
+            if isinstance(wl.items[idx], Message):
+                found.append(idx)
+            y += height
+            if y >= viewport:
+                break
+        return found
+
+    def _index_of_message(self, message: Message) -> int | None:
+        for idx, item in enumerate(self.message_list.items):
+            if isinstance(item, Message) and item.message_id == message.message_id:
+                return idx
+        return None
+
+    def _toggle_message_expansion(self, message: Message) -> None:
+        wl = self.message_list
+        index = self._index_of_message(message)
+        if index is None:
+            return
+        mid = message.message_id
+        moved = wl.cursor != index
+        if mid in self.expanded_message_ids:
+            self.expanded_message_ids.remove(mid)
+            wl.cursor = index
+            wl.top_skip = 0
+            wl._ensure_cursor_visible()
+        else:
+            width = max(10, wl.size.width or 0)
+            collapsed = self._render_message_lines(message, width)
+            before_h = len(collapsed)
+            hint_line = next(
+                (
+                    i for i, line in enumerate(collapsed)
+                    if "press 'z' to expand" in line.plain
+                ),
+                max(0, before_h - 1),
+            )
+            message_top = 0
+            for idx in range(wl.top_index, index):
+                height = wl._get_height(idx)
+                if idx == wl.top_index:
+                    height = max(0, height - wl.top_skip)
+                message_top += height
+            hint_y = message_top + hint_line
+            self.expanded_message_ids.add(mid)
+            self._place_expanded_message(index, before_h, hint_line, hint_y)
+        if moved:
+            wl.post_message(wl.CursorMoved(wl.cursor, wl.get_focused_item()))
+        wl.refresh()
+
+    def _place_expanded_message(
+        self, index: int, before_h: int, hint_line: int, hint_y: int
+    ) -> None:
+        """Keep the first newly revealed line on screen."""
+        wl = self.message_list
+        wl.cursor = index
+        after_h = wl._get_height(index)
+        viewport = max(1, wl.size.height)
+        if after_h <= viewport:
+            wl.top_skip = 0
+            wl._ensure_cursor_visible()
+            return
+        wl.top_index = index
+        max_skip = max(0, after_h - viewport)
+        if 0 <= hint_y < viewport:
+            desired = hint_line - hint_y
+        else:
+            desired = before_h - 3
+        wl.top_skip = min(max(0, desired), max_skip)
 
     def action_start_search(self) -> None:
         if self.is_write_mode:
@@ -667,7 +898,11 @@ class MessagesScreen(Screen):
         if self.message_list.clear_selection():
             return
 
-        # 5. Pop back to chat list
+        # 5. Dragged text
+        if self.message_list.clear_text_selection():
+            return
+
+        # 6. Pop back to chat list
         self.app.pop_screen()
 
     def action_show_help(self) -> None:

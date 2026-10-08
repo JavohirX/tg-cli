@@ -47,6 +47,22 @@ async def test_ctrl_c_double_tap_to_quit():
         assert not app.is_running
 
 
+@pytest.mark.asyncio
+async def test_ctrl_c_copies_a_selection_and_does_not_quit(monkeypatch):
+    copied: list[str] = []
+    monkeypatch.setattr(
+        "tg_cli.app.copy_text",
+        lambda app, text: copied.append(text) or True,
+    )
+    app = TelegramCLIApp(gateway=FakeGateway(chat_count=1))
+    async with app.run_test() as pilot:
+        app.screen.get_selected_text = lambda: "hello selection"
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert copied == ["hello selection"]
+        assert app.is_running
+
+
 def test_setup_logging_creates_log_file(tmp_path, monkeypatch):
     monkeypatch.setattr("tg_cli.__main__.get_app_data_dir", lambda: tmp_path)
     setup_logging(debug=True)

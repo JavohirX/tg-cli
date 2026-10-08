@@ -14,6 +14,7 @@ from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Static
 from tg_cli.domain.models import Account, AuthState
+from tg_cli.domain.render import cell_width, truncate_to_width
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import FooterBar, StatusBar
 from tg_cli.ui.window import WindowedList
@@ -74,7 +75,7 @@ class AccountsScreen(Screen):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Static("Telegram CLI — Accounts", id="header-box")
+            yield Static("Telegram CLI - Accounts", id="header-box")
             with Container(id="list-container"):
                 yield self.accounts_list
             yield self.status_bar
@@ -95,12 +96,12 @@ class AccountsScreen(Screen):
 
         from tg_cli.config import get_proxy_config
         proxy_cfg = get_proxy_config()
-        proxy_info = f" · [proxy: {proxy_cfg.get('type')}]" if proxy_cfg.get("enabled") else ""
+        proxy_info = f" | [proxy: {proxy_cfg.get('type')}]" if proxy_cfg.get("enabled") else ""
 
         if not accounts:
             self.status_bar.set_status(f"No accounts configured. Press 'A' to add, 'Q' for QR login.{proxy_info}")
         else:
-            self.status_bar.set_status(f"{len(accounts)} account(s) ready. Enter/1-9 to open · Q for QR · S for sessions.{proxy_info}")
+            self.status_bar.set_status(f"{len(accounts)} account(s) ready. Enter/1-9 to open | Q for QR | S for sessions.{proxy_info}")
 
     def _render_account_row(
         self, account: Account, width: int, is_cursor: bool, is_selected: bool
@@ -118,13 +119,18 @@ class AccountsScreen(Screen):
         unread_badge = f" ({unread})" if unread > 0 else ""
 
         pill = f"[{num_prefix}{account.label}{unread_badge}]"
+        pill_clean = truncate_to_width(pill, 28)
+        pad_pill = max(0, 28 - cell_width(pill_clean))
+        pill_str = pill_clean + (" " * pad_pill) + " "
         if unread > 0:
-            line.append(f"{pill:<28} ", style="bold yellow" if not is_cursor else "bold white")
+            line.append(pill_str, style="bold yellow" if not is_cursor else "bold white")
         else:
-            line.append(f"{pill:<28} ", style="bold white" if is_cursor else "white")
+            line.append(pill_str, style="bold white" if is_cursor else "white")
 
-        if account.display_name and account.display_name != account.label:
-            line.append(f"({account.display_name}) ", style="dim")
+        disp_raw = f"({account.display_name})" if (account.display_name and account.display_name != account.label) else ""
+        disp_clean = truncate_to_width(disp_raw, 24)
+        pad_disp = max(0, 24 - cell_width(disp_clean))
+        line.append(disp_clean + (" " * pad_disp) + " ", style="dim")
 
         if account.auth_state == AuthState.EXPIRED:
             line.append("[Session Expired]", style="bold red")
@@ -146,7 +152,8 @@ class AccountsScreen(Screen):
             self.status_bar.set_status(f"Session for {account.label} expired. Please re-authenticate.", is_error=True)
             self.action_add_account()
             return
-        self.app.open_account(account)
+        if hasattr(self.app, "open_account"):
+            self.app.open_account(account)
 
     def action_open_selected(self) -> None:
         item = self.accounts_list.get_focused_item()

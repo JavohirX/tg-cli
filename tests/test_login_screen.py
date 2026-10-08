@@ -121,3 +121,72 @@ async def test_account_removal_confirmation():
         await pilot.pause()
         assert acc_screen._pending_confirm is None
         assert len(gw.get_accounts()) == initial_count - 1
+
+
+def test_telethon_gateway_listener_dispatch(tmp_path):
+    from tg_cli.telegram.telethon_gw import TelethonGateway
+    db_file = tmp_path / "test.db"
+    events_received = []
+
+    def dummy_listener(evt, data):
+        events_received.append((evt, data))
+
+    gw = TelethonGateway(db_path=db_file)
+    gw.register_listener(dummy_listener)
+
+    # Trigger worker event dispatch
+    gw._on_worker_event("login_code_sent", {"phone": "+123456789"})
+    assert len(events_received) == 1
+    assert events_received[0] == ("login_code_sent", {"phone": "+123456789"})
+
+    gw.unregister_listener(dummy_listener)
+    gw._on_worker_event("qr_login_token", {"url": "tg://login?token=abc", "expires_in": 30})
+    assert len(events_received) == 1
+    gw.conn.close()
+
+
+@pytest.mark.asyncio
+async def test_login_screen_gateway_event_transition():
+    gw = FakeGateway(chat_count=1)
+    screen = LoginScreen(gateway=gw, start_mode="phone")
+    app = App()
+
+    async with app.run_test():
+        await app.push_screen(screen)
+        assert screen.step == "phone"
+
+        # Dispatch login_code_sent via _on_gateway_event
+        screen._on_gateway_event("login_code_sent", {"phone": "+123456789"})
+        assert screen.step == "code"
+
+        # Dispatch 2FA needed
+        screen._on_gateway_event("login_2fa_needed", {"hint": "test hint"})
+        assert screen.step == "password"
+
+
+@pytest.mark.asyncio
+async def test_phone_input_border_is_box_drawing():
+    """The phone field must not use Textual's `tall` eighth-block border.
+
+    Those glyphs (U+258A ▊, U+2594 ▔, U+258E ▎, U+2581 ▁) are missing in
+    common Windows console fonts and show up as a box of question marks.
+    """
+    gw = FakeGateway(chat_count=1)
+    app = App()
+
+    async with app.run_test(size=(90, 28)) as pilot:
+        screen = LoginScreen(gateway=gw, start_mode="phone")
+        await app.push_screen(screen)
+        await pilot.pause()
+        assert screen.step == "phone"
+
+        border = screen.query_one("#login-input").styles.border
+        assert border.top[0] == "solid"
+        assert border.bottom[0] == "solid"
+
+        rendered = "\n".join(strip.text for strip in app.screen._compositor.render_strips())
+        assert "┌" in rendered and "─" in rendered and "┐" in rendered
+        assert "+12025550101" in rendered
+        for missing in ("\u258a", "\u2594", "\u258e", "\u2581"):
+            assert missing not in rendered
+

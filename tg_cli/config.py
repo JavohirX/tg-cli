@@ -52,7 +52,7 @@ def load_config() -> dict[str, Any]:
         "api_id": None,
         "api_hash": "",
         "gemini_api_key": "",
-        "gemini_model": "gemini-1.5-flash",
+        "gemini_model": "gemini-3.8-flash",
         "proxy": dict(DEFAULT_PROXY),
     }
 
@@ -105,14 +105,14 @@ def save_config(
     api_id: int,
     api_hash: str,
     gemini_api_key: str = "",
-    gemini_model: str = "gemini-1.5-flash",
+    gemini_model: str = "gemini-3.8-flash",
 ) -> None:
     """Save api_id and api_hash to %APPDATA%\\tg-cli\\config.json."""
     cfg = load_config()
     cfg["api_id"] = int(api_id)
     cfg["api_hash"] = str(api_hash).strip()
     cfg["gemini_api_key"] = str(gemini_api_key).strip()
-    cfg["gemini_model"] = str(gemini_model).strip() or "gemini-1.5-flash"
+    cfg["gemini_model"] = str(gemini_model).strip() or "gemini-3.8-flash"
 
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
