@@ -450,10 +450,14 @@ def get_messages(
     before_id: int | None = None,
     search_query: str = "",
 ) -> list[Message]:
+    """Messages in chronological order, oldest first.
+
+    Local placeholders (queued or failed sends) have negative ids. They are
+    the newest messages, so they come last and never in an older page.
+    """
     params: list[object] = [account_id, chat_id]
     # A delete still inside its undo window is hidden, not gone.
-    sql = """
-        SELECT * FROM messages m
+    where = """
         WHERE account_id = ? AND chat_id = ?
         AND NOT EXISTS (
             SELECT 1 FROM pending_message_deletes p
@@ -462,41 +466,54 @@ def get_messages(
             AND p.message_id = m.message_id
         )
     """
-    if before_id is not None:
-        sql += " AND message_id < ?"
-        params.append(before_id)
     if search_query:
-        sql += " AND (plain_text LIKE ? OR sender_name LIKE ?)"
+        where += " AND (plain_text LIKE ? OR sender_name LIKE ?)"
         params.append(f"%{search_query}%")
         params.append(f"%{search_query}%")
-    sql += " ORDER BY message_id DESC LIMIT ?"
-    params.append(limit)
 
-    rows = conn.execute(sql, params).fetchall()
+    sent_sql = f"SELECT * FROM messages m {where} AND message_id > 0"
+    sent_params = list(params)
+    if before_id is not None:
+        sent_sql += " AND message_id < ?"
+        sent_params.append(before_id)
+    sent_sql += " ORDER BY message_id DESC LIMIT ?"
+    sent_params.append(limit)
+    sent = conn.execute(sent_sql, sent_params).fetchall()
+
+    local = []
+    if before_id is None:
+        # -1 was made before -2, so descending ids is the order they were sent.
+        local = conn.execute(
+            f"SELECT * FROM messages m {where} AND message_id < 0 ORDER BY message_id DESC",
+            params,
+        ).fetchall()
+
     # Reverse to return in chronological order (oldest to newest)
-    result = [
-        Message(
-            account_id=r["account_id"],
-            chat_id=r["chat_id"],
-            message_id=r["message_id"],
-            sender_id=r["sender_id"],
-            sender_name=r["sender_name"],
-            date=_parse_iso(r["date"]),
-            kind=MessageKind(r["kind"]),
-            plain_text=r["plain_text"] or "",
-            caption=r["caption"] or "",
-            entity_spans=json.loads(r["entity_spans"]) if r["entity_spans"] else [],
-            reply_id=r["reply_id"],
-            forward_label=r["forward_label"] or "",
-            edited=bool(r["edited"]),
-            outgoing=bool(r["outgoing"]),
-            send_state=SendState(r["send_state"]),
-            is_deleted=bool(r["is_deleted"]),
-            local_path=r["local_path"] or "",
-        )
-        for r in reversed(rows)
+    return [_message_from_row(r) for r in reversed(sent)] + [
+        _message_from_row(r) for r in local
     ]
-    return result
+
+
+def _message_from_row(r: sqlite3.Row) -> Message:
+    return Message(
+        account_id=r["account_id"],
+        chat_id=r["chat_id"],
+        message_id=r["message_id"],
+        sender_id=r["sender_id"],
+        sender_name=r["sender_name"],
+        date=_parse_iso(r["date"]),
+        kind=MessageKind(r["kind"]),
+        plain_text=r["plain_text"] or "",
+        caption=r["caption"] or "",
+        entity_spans=json.loads(r["entity_spans"]) if r["entity_spans"] else [],
+        reply_id=r["reply_id"],
+        forward_label=r["forward_label"] or "",
+        edited=bool(r["edited"]),
+        outgoing=bool(r["outgoing"]),
+        send_state=SendState(r["send_state"]),
+        is_deleted=bool(r["is_deleted"]),
+        local_path=r["local_path"] or "",
+    )
 
 
 def get_message(
@@ -511,25 +528,7 @@ def get_message(
     ).fetchone()
     if not row:
         return None
-    return Message(
-        account_id=row["account_id"],
-        chat_id=row["chat_id"],
-        message_id=row["message_id"],
-        sender_id=row["sender_id"],
-        sender_name=row["sender_name"],
-        date=_parse_iso(row["date"]),
-        kind=MessageKind(row["kind"]),
-        plain_text=row["plain_text"] or "",
-        caption=row["caption"] or "",
-        entity_spans=json.loads(row["entity_spans"]) if row["entity_spans"] else [],
-        reply_id=row["reply_id"],
-        forward_label=row["forward_label"] or "",
-        edited=bool(row["edited"]),
-        outgoing=bool(row["outgoing"]),
-        send_state=SendState(row["send_state"]),
-        is_deleted=bool(row["is_deleted"]),
-        local_path=row["local_path"] or "",
-    )
+    return _message_from_row(row)
 
 
 def upsert_messages(conn: sqlite3.Connection, messages: Sequence[Message]) -> None:
@@ -727,17 +726,19 @@ def finish_message_deletes(
         return
     placeholders = ",".join("?" for _ in message_ids)
     params = [account_id, chat_id, *message_ids]
+    # The connection autocommits each statement. Removing the messages first
+    # means no reader sees them unhidden but not yet deleted.
     with conn:
         conn.execute(
             f"""
-            DELETE FROM pending_message_deletes
+            DELETE FROM messages
             WHERE account_id = ? AND chat_id = ? AND message_id IN ({placeholders})
             """,
             params,
         )
         conn.execute(
             f"""
-            DELETE FROM messages
+            DELETE FROM pending_message_deletes
             WHERE account_id = ? AND chat_id = ? AND message_id IN ({placeholders})
             """,
             params,

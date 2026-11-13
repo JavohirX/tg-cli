@@ -383,8 +383,7 @@ class TelethonGateway:
                 "UPDATE messages SET plain_text = ?, edited = 1 WHERE account_id = ? AND chat_id = ? AND message_id = ?",
                 (text, account_id, chat_id, message_id),
             )
-        msgs = repo_get_messages(self.conn, account_id, chat_id, limit=1, before_id=message_id + 1)
-        updated = next((m for m in msgs if m.message_id == message_id), None)
+        updated = repo_get_message(self.conn, account_id, chat_id, message_id)
         if not updated:
             updated = Message(
                 account_id=account_id,

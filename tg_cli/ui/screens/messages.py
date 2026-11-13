@@ -451,11 +451,10 @@ class MessagesScreen(Screen):
         jump_to_end: bool = False,
     ) -> None:
         try:
-            messages = self.gateway.get_messages(
-                account_id=self.account.user_id,
-                chat_id=self.chat.chat_id,
-                limit=50,
-            )
+            if initial:
+                messages = self._read_latest()
+            else:
+                messages = self._read_loaded_window()
         except Exception as e:
             self.status_bar.set_status(f"Chat unavailable: {e}", is_error=True)
             return
@@ -479,6 +478,29 @@ class MessagesScreen(Screen):
         else:
             self.status_bar.set_status(f"{len(messages)} messages loaded.")
 
+    def _read_latest(self) -> list[Message]:
+        return self.gateway.get_messages(
+            account_id=self.account.user_id,
+            chat_id=self.chat.chat_id,
+            limit=50,
+        )
+
+    def _read_loaded_window(self) -> list[Message]:
+        """The newest page plus every older page already loaded, read again.
+
+        A live message used to reload only the newest 50, so history the
+        user had scrolled through vanished. Older pages are re-read, not
+        kept, so a delete or edit inside them still shows.
+        """
+        latest = self._read_latest()
+        first_new = next((m.message_id for m in latest if m.message_id > 0), None)
+        if first_new is None:
+            return latest
+        older_count = sum(1 for m in self._all_messages if 0 < m.message_id < first_new)
+        if older_count == 0:
+            return latest
+        return self._read_older(first_new, limit=older_count) + latest
+
     def _history_fetch_pending(self, before_id: int) -> bool:
         probe = getattr(self.gateway, "message_fetch_in_flight", None)
         if probe is None:
@@ -489,11 +511,11 @@ class MessagesScreen(Screen):
         self._pending_before_id = None
         self._is_loading_older = False
 
-    def _read_older(self, before_id: int) -> list[Message]:
+    def _read_older(self, before_id: int, limit: int = 50) -> list[Message]:
         return self.gateway.get_messages(
             account_id=self.account.user_id,
             chat_id=self.chat.chat_id,
-            limit=50,
+            limit=limit,
             before_id=before_id,
         )
 

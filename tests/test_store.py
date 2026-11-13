@@ -220,6 +220,16 @@ def test_forced_claim_takes_deletes_still_in_their_window(conn):
     assert claim_due_message_deletes(conn, force=True) == [(1, 5, False, 0, [1])]
 
 
+def test_local_placeholders_are_the_newest_messages(conn):
+    _store_messages(conn, list(range(1, 61)) + [-1, -2])
+    latest = get_messages(conn, 1, 5, limit=50)
+    assert [m.message_id for m in latest[-3:]] == [60, -1, -2]
+    assert latest[0].message_id == 11
+    older = get_messages(conn, 1, 5, limit=50, before_id=11)
+    assert [m.message_id for m in older] == list(range(1, 11))
+    assert get_messages(conn, 1, 5, before_id=-1) == []
+
+
 def test_min_message_id_sees_local_placeholders(conn):
     assert min_message_id(conn) == 0
     _store_messages(conn, [-4, 7])

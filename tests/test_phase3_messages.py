@@ -487,6 +487,67 @@ async def test_d_in_a_supergroup_asks_because_it_deletes_for_everyone():
 
 
 @pytest.mark.asyncio
+async def test_live_message_keeps_the_history_already_loaded():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("home", "k")
+        await pilot.pause()
+        assert len(screen._all_messages) == 100
+        await pilot.press("j", "j")
+        focused = screen.message_list.get_focused_item()
+
+        gw.messages[(alice.user_id, 1)].append(
+            Message(
+                account_id=alice.user_id,
+                chat_id=1,
+                message_id=121,
+                sender_name="Bob",
+                date=datetime.now(timezone.utc),
+                plain_text="Live one",
+            )
+        )
+        gw.emit_event("messages_changed", {"user_id": alice.user_id, "chat_id": 1})
+        await pilot.pause()
+
+        ids = _ids_on_screen(screen)
+        assert ids[0] == 21 and ids[-1] == 121
+        assert len(ids) == 101
+        assert screen.message_list.get_focused_item().message_id == focused.message_id
+
+
+@pytest.mark.asyncio
+async def test_delete_in_older_history_keeps_the_rest_loaded():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("home", "k")
+        await pilot.pause()
+        await pilot.press("k", "k")
+        target = screen.message_list.get_focused_item().message_id
+        assert target < 71
+
+        await pilot.press("d")
+        await pilot.pause()
+        ids = _ids_on_screen(screen)
+        assert target not in ids
+        assert ids[-1] == 120
+        assert min(ids) <= 21
+
+
+@pytest.mark.asyncio
 async def test_messages_history_paging_up():
     gw = MessagePagingGateway()
     alice = gw.get_accounts()[0]

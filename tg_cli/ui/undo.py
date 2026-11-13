@@ -33,8 +33,12 @@ class UndoSlot:
         """Run the undo. Returns False when there was nothing to undo."""
         if self._pending is None:
             return False
-        description, undo_fn, _ = self._pending
+        description, undo_fn, expiry = self._pending
         self._pending = None
+        # Past the window the worker may already have sent the action.
+        if time.time() > expiry:
+            self.status_bar.set_toast(None)
+            return False
         undo_fn()
         self.status_bar.set_toast(f"Undone: {description}")
         return True
