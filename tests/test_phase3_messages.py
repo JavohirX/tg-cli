@@ -548,6 +548,44 @@ async def test_delete_in_older_history_keeps_the_rest_loaded():
 
 
 @pytest.mark.asyncio
+async def test_closing_a_search_leaves_no_gap_in_history():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        loaded = _ids_on_screen(screen)
+        assert loaded[0] == 71
+
+        # "#5" also matches #5 and #50-#59, all older than the loaded page.
+        await pilot.press("/", "#", "5", "enter")
+        await pilot.pause()
+        shown = [
+            item.message_id for item in screen.message_list.items
+            if isinstance(item, Message)
+        ]
+        assert 5 in shown and 59 in shown and 71 not in shown
+
+        # A live message during the search keeps the filter on screen.
+        gw.emit_event("messages_changed", {"user_id": alice.user_id, "chat_id": 1})
+        await pilot.pause()
+        shown = [
+            item.message_id for item in screen.message_list.items
+            if isinstance(item, Message)
+        ]
+        assert 120 not in shown and 5 in shown
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert _ids_on_screen(screen) == loaded
+        assert screen.message_list.items[-1].message_id == 120
+
+
+@pytest.mark.asyncio
 async def test_messages_history_paging_up():
     gw = MessagePagingGateway()
     alice = gw.get_accounts()[0]

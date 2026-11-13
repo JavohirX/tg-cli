@@ -49,6 +49,13 @@ from tg_cli.ui.undo import UndoSlot
 from tg_cli.ui.window import WindowedList
 
 
+def _chronological(message: Message) -> tuple[int, int]:
+    """Sent messages by id, then local placeholders in the order they were made."""
+    if message.message_id < 0:
+        return (1, -message.message_id)
+    return (0, message.message_id)
+
+
 class MessagesScreen(Screen):
     """Message view and composition screen."""
 
@@ -124,6 +131,9 @@ class MessagesScreen(Screen):
         self._pending_before_id: int | None = None
         self._unseen_count: int = 0
         self.search_query: str = ""
+        # Matches from outside the loaded history. Kept apart so closing the
+        # search leaves no gaps in the timeline.
+        self._search_hits: list[Message] = []
         self._pending_confirm: tuple[str, Callable[[], None]] | None = None
         # Height checks and the paint that follows share one render of a row.
         self._line_cache: OrderedDict[tuple, list[Text]] = OrderedDict()
@@ -465,7 +475,8 @@ class MessagesScreen(Screen):
         self._all_messages = messages
         for m in messages:
             self._message_cache[m.message_id] = m
-        items = self._build_stream_items(messages)
+        # A live message during a search keeps the filter on screen.
+        items = self._build_stream_items(self._visible_messages())
         self.message_list.set_items(items, keep_cursor=not initial and not jump_to_end)
 
         if initial or jump_to_end:
@@ -588,20 +599,11 @@ class MessagesScreen(Screen):
             self.status_bar.set_status(f"{len(self._all_messages)} messages loaded.")
             return
 
-        prev_focused = self.message_list.get_focused_item()
         self._all_messages = new_older + self._all_messages
-        new_items = self._build_stream_items(self._all_messages)
-
-        new_cursor = 0
-        if isinstance(prev_focused, Message):
-            for idx, item in enumerate(new_items):
-                if isinstance(item, Message) and item.message_id == prev_focused.message_id:
-                    new_cursor = idx
-                    break
-
-        self.message_list.set_items(new_items, keep_cursor=True)
-        self.message_list.cursor = new_cursor
-        self.message_list._ensure_cursor_visible()
+        # set_items keeps the cursor on the message it was on.
+        self.message_list.set_items(
+            self._build_stream_items(self._visible_messages()), keep_cursor=True
+        )
         self.status_bar.set_status(f"Loaded {len(new_older)} older messages.")
 
     def on_windowed_list_reached_top(self, event: WindowedList.ReachedTop) -> None:
@@ -1086,19 +1088,27 @@ class MessagesScreen(Screen):
             query = event.value.strip()
             if query:
                 # Query gateway for messages outside window
-                older = self.gateway.get_messages(
+                found = self.gateway.get_messages(
                     account_id=self.account.user_id,
                     chat_id=self.chat.chat_id,
                     limit=50,
                     search_query=query,
                 )
-                if older:
-                    existing_ids = {m.message_id for m in self._all_messages}
-                    new_msgs = [m for m in older if m.message_id not in existing_ids]
-                    if new_msgs:
-                        self._all_messages = sorted(new_msgs + self._all_messages, key=lambda m: m.message_id)
+                existing_ids = {m.message_id for m in self._all_messages}
+                self._search_hits = [m for m in found if m.message_id not in existing_ids]
             self._apply_search_filter(jump=True)
             self.message_list.focus()
+
+    def _visible_messages(self) -> list[Message]:
+        """The loaded history, or what matches the search in it and in the hits."""
+        if not self.search_query:
+            return self._all_messages
+        q = self.search_query.lower()
+        pool = sorted(self._search_hits + self._all_messages, key=_chronological)
+        return [
+            m for m in pool
+            if q in m.plain_text.lower() or q in m.sender_name.lower()
+        ]
 
     def _apply_search_filter(self, jump: bool = False) -> None:
         if not self.search_query:
@@ -1106,11 +1116,7 @@ class MessagesScreen(Screen):
             self.message_list.set_items(items, keep_cursor=True)
             return
 
-        q = self.search_query.lower()
-        matched = [
-            m for m in self._all_messages
-            if q in m.plain_text.lower() or q in m.sender_name.lower()
-        ]
+        matched = self._visible_messages()
         items = self._build_stream_items(matched)
         self.message_list.set_items(items, keep_cursor=not jump)
         if jump and items:
@@ -1177,6 +1183,7 @@ class MessagesScreen(Screen):
         if container.display:
             container.display = False
             self.search_query = ""
+            self._search_hits = []
             self.filter_input.value = ""
             self._apply_search_filter(jump=False)
             self.message_list.focus()
