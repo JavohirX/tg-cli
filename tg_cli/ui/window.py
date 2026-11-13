@@ -182,6 +182,12 @@ class WindowedList(Widget, Generic[T]):
         Binding("pageup", "page_up", "Page Up", show=False),
         Binding("home", "jump_top", "Top", show=False),
         Binding("end", "jump_bottom", "Bottom", show=False),
+        Binding("shift+down", "select_down", "Extend Down", show=False),
+        Binding("shift+up", "select_up", "Extend Up", show=False),
+        Binding("shift+pagedown", "select_page_down", "Extend Page Down", show=False),
+        Binding("shift+pageup", "select_page_up", "Extend Page Up", show=False),
+        Binding("shift+home", "select_top", "Extend to Top", show=False),
+        Binding("shift+end", "select_bottom", "Extend to Bottom", show=False),
         Binding("v", "toggle_anchor", "Range Select", show=False),
         Binding("space", "toggle_select", "Toggle", show=False),
         Binding("V", "select_all", "Select All", show=False),
@@ -222,6 +228,11 @@ class WindowedList(Widget, Generic[T]):
         self.top_skip: int = 0
         self.selected_ids: set[Any] = set()
         self.anchor_index: int | None = None
+        # Selection from before the range began. A range adds to it, so
+        # items picked with Space survive a v or Shift range.
+        self._range_base: set[Any] = set()
+        # A Shift range ends at the next plain motion; a `v` range does not.
+        self._shift_anchor: bool = False
         self.digit_buffer: str = ""
         self._last_click_time: float = 0.0
         self._last_click_idx: int | None = None
@@ -304,6 +315,8 @@ class WindowedList(Widget, Generic[T]):
         had_selection = bool(self.selected_ids or self.anchor_index is not None)
         self.selected_ids.clear()
         self.anchor_index = None
+        self._range_base = set()
+        self._shift_anchor = False
         if had_selection:
             self.post_message(self.SelectionUpdated(set()))
             self.refresh()
@@ -472,11 +485,51 @@ class WindowedList(Widget, Generic[T]):
             return
         start = min(self.anchor_index, self.cursor)
         end = max(self.anchor_index, self.cursor)
-        self.selected_ids.clear()
+        self.selected_ids = set(self._range_base)
         for i in range(start, end + 1):
             if self._is_selectable(i):
                 self.selected_ids.add(self._id_fn(self._items[i]))
         self.post_message(self.SelectionUpdated(set(self.selected_ids)))
+
+    def _begin_range(self, *, shift: bool) -> None:
+        """Anchor a range at the cursor on top of what is already selected."""
+        self.anchor_index = self.cursor
+        self._range_base = set(self.selected_ids)
+        self._shift_anchor = shift
+
+    def _end_shift_range(self) -> None:
+        """A plain motion after Shift stops extending. The selection stays."""
+        if self._shift_anchor:
+            self.anchor_index = None
+            self._shift_anchor = False
+
+    def _extend_with(self, move: Callable[[], None]) -> None:
+        self.digit_buffer = ""
+        if self.anchor_index is None:
+            self._begin_range(shift=True)
+        move()
+        # The cursor may not have moved, at an end of the list. The anchor
+        # item is still part of the range.
+        self._update_range_selection()
+        self.refresh()
+
+    def action_select_down(self) -> None:
+        self._extend_with(lambda: self._move_cursor(1))
+
+    def action_select_up(self) -> None:
+        self._extend_with(lambda: self._move_cursor(-1))
+
+    def action_select_page_down(self) -> None:
+        self._extend_with(lambda: self._page(max(1, self.size.height - 1)))
+
+    def action_select_page_up(self) -> None:
+        self._extend_with(lambda: self._page(-max(1, self.size.height - 1)))
+
+    def action_select_top(self) -> None:
+        self._extend_with(self._jump_top)
+
+    def action_select_bottom(self) -> None:
+        self._extend_with(self._jump_bottom)
 
     def _get_count_prefix(self) -> int:
         if self.digit_buffer:
@@ -490,10 +543,12 @@ class WindowedList(Widget, Generic[T]):
 
     # Key actions
     def action_cursor_down(self) -> None:
+        self._end_shift_range()
         count = self._get_count_prefix()
         self._move_cursor(count)
 
     def action_cursor_up(self) -> None:
+        self._end_shift_range()
         count = self._get_count_prefix()
         self._move_cursor(-count)
 
@@ -633,18 +688,30 @@ class WindowedList(Widget, Generic[T]):
         self._scroll_by_lines(delta)
 
     def action_half_page_down(self) -> None:
+        self._end_shift_range()
         self._page(max(1, self.size.height // 2))
 
     def action_half_page_up(self) -> None:
+        self._end_shift_range()
         self._page(-max(1, self.size.height // 2))
 
     def action_page_down(self) -> None:
+        self._end_shift_range()
         self._page(max(1, self.size.height - 1))
 
     def action_page_up(self) -> None:
+        self._end_shift_range()
         self._page(-max(1, self.size.height - 1))
 
     def action_jump_top(self) -> None:
+        self._end_shift_range()
+        self._jump_top()
+
+    def action_jump_bottom(self) -> None:
+        self._end_shift_range()
+        self._jump_bottom()
+
+    def _jump_top(self) -> None:
         self.digit_buffer = ""
         self.clear_text_selection()
         self.top_skip = 0
@@ -656,7 +723,7 @@ class WindowedList(Widget, Generic[T]):
         self.post_message(self.CursorMoved(self.cursor, self.get_focused_item()))
         self.refresh()
 
-    def action_jump_bottom(self) -> None:
+    def _jump_bottom(self) -> None:
         self.digit_buffer = ""
         self.clear_text_selection()
         self.top_skip = 0
@@ -672,8 +739,8 @@ class WindowedList(Widget, Generic[T]):
     def action_toggle_anchor(self) -> None:
         """'v' sets anchor. If anchor already set, clears anchor."""
         self.digit_buffer = ""
-        if self.anchor_index is None:
-            self.anchor_index = self.cursor
+        if self.anchor_index is None or self._shift_anchor:
+            self._begin_range(shift=False)
             # Select current item as anchor
             if self._is_selectable(self.cursor):
                 self.selected_ids.add(self._id_fn(self._items[self.cursor]))
@@ -686,6 +753,7 @@ class WindowedList(Widget, Generic[T]):
         """Space toggles selection of current item."""
         self.digit_buffer = ""
         self.anchor_index = None  # manual toggle cancels range anchor
+        self._shift_anchor = False
         item = self.get_focused_item()
         if item is not None and self._is_selectable(self.cursor):
             item_id = self._id_fn(item)
@@ -707,6 +775,7 @@ class WindowedList(Widget, Generic[T]):
         def do_select() -> None:
             self.selected_ids = {self._id_fn(item) for item in selectable_items}
             self.anchor_index = None
+            self._shift_anchor = False
             self.post_message(self.SelectionUpdated(set(self.selected_ids)))
             self.refresh()
 
@@ -930,9 +999,19 @@ class WindowedList(Widget, Generic[T]):
         if clicked_idx is None or not self._is_selectable(clicked_idx):
             return
 
+        # Windows Terminal keeps Shift+click for its own text selection, so
+        # Shift+click only arrives from other terminals. Ctrl+click does.
+        if event.ctrl or event.shift:
+            self._click_select(clicked_idx, extend=event.shift)
+            return
+        self._end_shift_range()
+
         if clicked_idx != self.cursor:
             self.top_skip = 0
         self.cursor = clicked_idx
+        if self.anchor_index is not None:
+            # A `v` range follows the click like it follows j and k.
+            self._update_range_selection()
         self._ensure_cursor_visible()
         self.post_message(self.CursorMoved(self.cursor, self.get_focused_item()))
 
@@ -948,6 +1027,23 @@ class WindowedList(Widget, Generic[T]):
             self._last_click_time = now
             self._last_click_idx = clicked_idx
 
+        self.refresh()
+
+    def _click_select(self, index: int, *, extend: bool) -> None:
+        """Shift+click extends a range to the row; Ctrl+click toggles the row."""
+        if extend:
+            if self.anchor_index is None:
+                self._begin_range(shift=True)
+            self.cursor = index
+            self._update_range_selection()
+        else:
+            self._end_shift_range()
+            self.cursor = index
+            self.action_toggle_select()
+        self.top_skip = 0
+        self._last_click_idx = None
+        self._ensure_cursor_visible()
+        self.post_message(self.CursorMoved(self.cursor, self.get_focused_item()))
         self.refresh()
 
     def _selection_span(self, y: int) -> tuple[int, int] | None:
@@ -1007,10 +1103,12 @@ class WindowedList(Widget, Generic[T]):
 
     def on_mouse_scroll_down(self, event: MouseScrollDown) -> None:
         event.stop()
+        self._end_shift_range()
         self._scroll_by_lines(WHEEL_LINES)
 
     def on_mouse_scroll_up(self, event: MouseScrollUp) -> None:
         event.stop()
+        self._end_shift_range()
         self._scroll_by_lines(-WHEEL_LINES)
 
 

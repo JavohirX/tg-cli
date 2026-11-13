@@ -164,6 +164,14 @@ COMMANDS: tuple[Command, ...] = (
         description="Toggle selection of focused item",
     ),
     Command(
+        id="extend_selection",
+        title="Extend Selection",
+        keys=("shift+down", "shift+up"),
+        display_key="Shift+Up/Dn",
+        contexts=("chats", "messages"),
+        description="Select a range from the cursor; Shift+PgUp/PgDn/Home/End too. Ctrl+click toggles",
+    ),
+    Command(
         id="select_all",
         title="Select All Filtered",
         keys=("V",),

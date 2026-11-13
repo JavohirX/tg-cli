@@ -7,6 +7,14 @@ from textual.app import App, ComposeResult
 from tg_cli.ui.window import WHEEL_LINES, WindowedList
 
 
+def _click(widget, y: int, *, shift: bool = False, ctrl: bool = False):
+    from textual.events import Click
+    return Click(
+        widget, x=5, y=y, delta_x=0, delta_y=0, button=1,
+        shift=shift, meta=False, ctrl=ctrl,
+    )
+
+
 class WindowListTestApp(App):
     def __init__(self, items: list[str], height: int = 20) -> None:
         super().__init__()
@@ -200,8 +208,7 @@ async def test_windowed_list_click_navigation_and_activation():
         assert w.cursor == 0
 
         # Click on row index 4 (y=4)
-        from textual.events import Click
-        w.on_click(Click(w, 5, 4, 5, 4, 5, 4, 0, False, False, False))
+        w.on_click(_click(w, 4))
         await pilot.pause()
         assert w.cursor == 4
 
@@ -210,7 +217,7 @@ async def test_windowed_list_click_navigation_and_activation():
         assert w.cursor == 5
 
         # Double click on row 5: call on_click twice rapidly
-        click_ev = Click(w, 5, 5, 5, 5, 5, 5, 0, False, False, False)
+        click_ev = _click(w, 5)
         w.on_click(click_ev)
         w.on_click(click_ev)
         await pilot.pause()
@@ -602,3 +609,101 @@ async def test_range_anchor_follows_its_item():
         assert w.items[w.anchor_index] == "Row 2"
         await pilot.press("j")
         assert w.selected_ids == {"Row 2", "Row 3", "Row 4"}
+
+
+@pytest.mark.asyncio
+async def test_shift_arrows_select_a_range_and_shrink_it():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.press("j", "j", "shift+down", "shift+down")
+        assert w.selected_ids == {"Row 2", "Row 3", "Row 4"}
+        await pilot.press("shift+up")
+        assert w.selected_ids == {"Row 2", "Row 3"}
+        await pilot.press("shift+up", "shift+up")
+        assert w.selected_ids == {"Row 1", "Row 2"}
+
+
+@pytest.mark.asyncio
+async def test_a_range_adds_to_what_space_picked():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.press("space", "j", "j", "j", "shift+down")
+        assert w.selected_ids == {"Row 0", "Row 3", "Row 4"}
+        # `v` ranges add too, instead of wiping the earlier picks.
+        await pilot.press("j", "j", "v", "j")
+        assert w.selected_ids == {"Row 0", "Row 3", "Row 4", "Row 6", "Row 7"}
+
+
+@pytest.mark.asyncio
+async def test_plain_motion_ends_a_shift_range_but_keeps_it():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.press("shift+down", "j", "j")
+        assert w.selected_ids == {"Row 0", "Row 1"}
+        assert w.anchor_index is None
+        # A new Shift range starts where the cursor is now.
+        await pilot.press("shift+down")
+        assert w.selected_ids == {"Row 0", "Row 1", "Row 3", "Row 4"}
+
+
+@pytest.mark.asyncio
+async def test_shift_end_and_home_extend_to_the_ends():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.press("j", "j", "j", "j", "j", "j", "j", "shift+end")
+        assert w.selected_ids == {"Row 7", "Row 8", "Row 9"}
+        await pilot.press("shift+home")
+        assert w.selected_ids == {f"Row {i}" for i in range(8)}
+
+
+@pytest.mark.asyncio
+async def test_shift_at_the_last_row_still_selects_it():
+    items = [f"Row {i}" for i in range(3)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.press("end", "shift+down")
+        assert w.selected_ids == {"Row 2"}
+
+
+@pytest.mark.asyncio
+async def test_ctrl_click_toggles_and_shift_click_extends():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.pause()
+        w.on_click(_click(w, 2, ctrl=True))
+        w.on_click(_click(w, 5, ctrl=True))
+        assert w.selected_ids == {"Row 2", "Row 5"}
+        w.on_click(_click(w, 5, ctrl=True))
+        assert w.selected_ids == {"Row 2"}
+        w.on_click(_click(w, 7, shift=True))
+        assert w.cursor == 7
+        assert w.selected_ids == {"Row 2", "Row 5", "Row 6", "Row 7"}
+
+
+@pytest.mark.asyncio
+async def test_click_extends_a_v_range():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.press("j", "v")
+        w.on_click(_click(w, 4))
+        assert w.selected_ids == {"Row 1", "Row 2", "Row 3", "Row 4"}

@@ -863,3 +863,32 @@ def test_group_screen_prints_admin_and_owner_after_the_name():
     assert any("Ada admin" in line for line in admin_lines)
     assert any("Bea owner" in line for line in owner_lines)
 
+
+
+@pytest.mark.asyncio
+async def test_shift_up_extends_across_older_history_and_d_deletes_it():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("home")
+        await pilot.pause()
+        assert screen.message_list.get_focused_item().message_id == 71
+
+        # At the top, Shift+Up loads the older page; the range survives it.
+        await pilot.press("shift+up")
+        await pilot.pause()
+        await pilot.press("shift+up", "shift+up")
+        await pilot.pause()
+        selected = sorted(m.message_id for m in screen.message_list.get_selected_items())
+        assert selected == [69, 70, 71]
+        assert "3 selected" in screen.status_bar.status_message
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert gw.delete_calls[-1] == (alice.user_id, 1, [69, 70, 71], False)

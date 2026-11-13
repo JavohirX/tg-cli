@@ -632,6 +632,12 @@ class MessagesScreen(Screen):
         if self.is_write_mode:
             self._set_focus_mode(is_write=False)
 
+    def on_windowed_list_selection_updated(
+        self, event: WindowedList.SelectionUpdated
+    ) -> None:
+        if event.selected_ids:
+            self.status_bar.set_status(f"{len(event.selected_ids)} selected. Esc clears.")
+
     def on_windowed_list_text_copied(self, event: WindowedList.TextCopied) -> None:
         self.status_bar.set_status("Copied.")
 

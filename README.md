@@ -90,8 +90,10 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 | `PageDown` / `PageUp` | Full-page down / up |
 | `Home` | Jump to top (triggers older history load in chat) |
 | `End` | Jump to bottom |
-| `v` | Start visual range selection anchor |
-| `Space` | Toggle selection of current item |
+| `v` | Start visual range selection anchor (`j`/`k` extend it) |
+| `Shift+↑` / `Shift+↓` | Select a range from the cursor; `Shift+PgUp/PgDn/Home/End` extend by page or to the end. The next plain move stops extending and keeps the selection |
+| `Space` | Toggle selection of current item. Ranges add to what Space picked |
+| `Ctrl+click` | Toggle the clicked item (Shift+click extends a range in terminals that pass it; Windows Terminal keeps it for its own text selection) |
 | `V` | Select all items in view (confirms if > 50) |
 
 ### Chat List Actions
