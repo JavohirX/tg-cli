@@ -21,4 +21,4 @@ venv/
 !.env.example
 config.json
 sessions/
-
+.build-stamp

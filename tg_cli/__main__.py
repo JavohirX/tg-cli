@@ -57,8 +57,10 @@ def setup_windows_console() -> None:
 def reset_terminal_title() -> None:
     """The tab would keep the last unread count after the app exits."""
     try:
-        sys.stdout.write(RESET_TERMINAL_TITLE)
-        sys.stdout.flush()
+        # Redirected output (`tg-cli --help > file`) should not get the escape.
+        if sys.stdout.isatty():
+            sys.stdout.write(RESET_TERMINAL_TITLE)
+            sys.stdout.flush()
     except Exception:
         pass
 
