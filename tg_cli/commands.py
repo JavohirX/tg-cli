@@ -328,7 +328,7 @@ COMMANDS: tuple[Command, ...] = (
         keys=("y",),
         display_key="y",
         contexts=("messages",),
-        description="Copy the focused message. Drag any text, then Ctrl+C or right-click",
+        description="Copy the focused message, or the selected ones as a transcript. Drag any text, then Ctrl+C or right-click",
     ),
     Command(
         id="open_link",

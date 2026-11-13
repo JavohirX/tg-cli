@@ -40,6 +40,7 @@ from tg_cli.domain.models import (
 from tg_cli.domain.render import (
     format_date_separator,
     message_bundle_flags,
+    messages_as_text,
     render_message,
     sender_header_flags,
 )
@@ -953,7 +954,17 @@ class MessagesScreen(Screen):
         self.message_list.refresh()
 
     def action_yank_focused(self) -> None:
+        """Copy the selected messages as a transcript, or the focused one's text."""
         if self.is_write_mode:
+            return
+        selected = [
+            m for m in self.message_list.get_selected_items() if isinstance(m, Message)
+        ]
+        if selected:
+            if copy_text(self.app, messages_as_text(selected)):
+                self.status_bar.set_status(f"Copied {len(selected)} message(s).")
+            else:
+                self.status_bar.set_status("Clipboard copy failed.", is_error=True)
             return
         focused = self.message_list.get_focused_item()
         if focused is not None and isinstance(focused, Message):

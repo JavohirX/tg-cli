@@ -892,3 +892,28 @@ async def test_shift_up_extends_across_older_history_and_d_deletes_it():
         await pilot.press("d")
         await pilot.pause()
         assert gw.delete_calls[-1] == (alice.user_id, 1, [69, 70, 71], False)
+
+
+@pytest.mark.asyncio
+async def test_y_copies_the_selection_as_a_transcript(monkeypatch):
+    copied: list[str] = []
+    monkeypatch.setattr(
+        "tg_cli.ui.screens.messages.copy_text",
+        lambda app, text: copied.append(text) or True,
+    )
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("shift+up", "y")
+        await pilot.pause()
+        assert len(copied) == 1
+        lines = copied[0].splitlines()
+        assert lines[0].endswith("Bob: Message #119")
+        assert lines[1].endswith("Alice: Message #120")
+        assert "Copied 2 message(s)." in screen.status_bar.status_message

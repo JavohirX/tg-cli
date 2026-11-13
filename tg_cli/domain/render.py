@@ -453,6 +453,24 @@ def format_chat_time(dt: datetime | None, *, now: datetime | None = None) -> str
     return str(local_dt.year)
 
 
+def messages_as_text(messages: list[Message]) -> str:
+    """Selected messages as plain text for the clipboard, oldest first.
+
+    One block per message: "[2026-11-13 14:30] Alice: text". A caption goes
+    on the line after a media placeholder.
+    """
+    blocks: list[str] = []
+    for message in messages:
+        local_dt = to_local_datetime(message.date) if message.date else None
+        stamp = local_dt.strftime("%Y-%m-%d %H:%M") if local_dt else ""
+        body = message.plain_text or ""
+        if message.caption and message.caption not in body:
+            body = f"{body}\n{message.caption}" if body else message.caption
+        head = f"[{stamp}] " if stamp else ""
+        blocks.append(f"{head}{message.sender_name or 'Unknown'}: {body}")
+    return "\n".join(blocks)
+
+
 def format_date_separator(dt: datetime | None) -> str:
     """Format date separator adjusted to the user's system clock."""
     if dt is None:

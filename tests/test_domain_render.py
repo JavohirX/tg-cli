@@ -921,3 +921,20 @@ def test_service_line_does_not_hide_the_next_name():
 
 
 
+
+
+def test_selected_messages_copy_as_a_transcript():
+    from datetime import datetime, timezone
+    from tg_cli.domain.models import Message, MessageKind
+    from tg_cli.domain.render import messages_as_text, to_local_datetime
+
+    when = datetime(2026, 11, 13, 9, 5, tzinfo=timezone.utc)
+    stamp = to_local_datetime(when).strftime("%Y-%m-%d %H:%M")
+    text = messages_as_text([
+        Message(account_id=1, chat_id=1, message_id=1, sender_name="Alice",
+                date=when, plain_text="hi\nthere"),
+        Message(account_id=1, chat_id=1, message_id=2, sender_name="Bob",
+                date=when, kind=MessageKind.PHOTO, plain_text="[photo]",
+                caption="the view"),
+    ])
+    assert text == f"[{stamp}] Alice: hi\nthere\n[{stamp}] Bob: [photo]\nthe view"

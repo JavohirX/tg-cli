@@ -122,7 +122,7 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 | `u` | Undo the last delete within 5 seconds |
 | `t` | Transcribe voice message with Gemini (cached) |
 | `T` | Force re-transcribe voice message (bypasses cache) |
-| `y` | Copy message text to system clipboard |
+| `y` | Copy message text to system clipboard; with a selection, copy it as `[time] Sender: text` lines |
 | `o` | Open the link in the focused message; `o` again opens the next one |
 | `z` | Toggle message clamping (expand/collapse > 4 lines) |
 | `/` | Search loaded messages or query older history from Telegram |
