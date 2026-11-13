@@ -543,3 +543,62 @@ async def test_stripe_leaves_cursor_badge_and_selection_colors():
         assert selected[2] != plain[2]
         assert selected[0] == plain[0]
 
+
+
+@pytest.mark.asyncio
+async def test_cursor_follows_its_item_when_rows_move_above_it():
+    items = [f"Chat {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        await pilot.pause()
+        w.cursor = 5
+        # A message lands in Chat 8, so it jumps to the top.
+        w.set_items(["Chat 8"] + [c for c in items if c != "Chat 8"])
+        assert w.get_focused_item() == "Chat 5"
+        assert w.cursor == 6
+
+
+@pytest.mark.asyncio
+async def test_cursor_takes_the_next_item_when_its_own_is_gone():
+    items = [f"Chat {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        await pilot.pause()
+        w.cursor = 9
+        w.set_items(items[:9])
+        assert w.get_focused_item() == "Chat 8"
+        w.cursor = 3
+        w.set_items([c for c in items[:9] if c != "Chat 3"])
+        assert w.get_focused_item() == "Chat 4"
+
+
+@pytest.mark.asyncio
+async def test_scrolled_list_keeps_the_cursor_on_its_screen_row():
+    items = [f"Chat {i}" for i in range(100)]
+    app = WindowListTestApp(items, height=10)
+    async with app.run_test(size=(40, 10)) as pilot:
+        w = app.window_list
+        await pilot.pause()
+        w.top_index = 40
+        w.cursor = 45
+        w.set_items(["New"] + items)
+        assert w.get_focused_item() == "Chat 45"
+        assert w.cursor - w.top_index == 5
+
+
+@pytest.mark.asyncio
+async def test_range_anchor_follows_its_item():
+    items = [f"Row {i}" for i in range(10)]
+    app = WindowListTestApp(items)
+    async with app.run_test() as pilot:
+        w = app.window_list
+        w.focus()
+        await pilot.pause()
+        await pilot.press("j", "j", "v", "j")
+        assert w.selected_ids == {"Row 2", "Row 3"}
+        w.set_items(["Older A", "Older B"] + items)
+        assert w.items[w.anchor_index] == "Row 2"
+        await pilot.press("j")
+        assert w.selected_ids == {"Row 2", "Row 3", "Row 4"}

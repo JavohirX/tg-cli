@@ -232,8 +232,16 @@ class WindowedList(Widget, Generic[T]):
         return self._items
 
     def set_items(self, new_items: Sequence[T], keep_cursor: bool = True) -> None:
-        """Update items list, maintaining cursor within valid bounds."""
+        """Replace the items. `keep_cursor` follows the focused item by id.
+
+        A live update can move rows above the cursor. Keeping the index would
+        land on a different item and the next action would hit it. When the
+        focused item is gone, the one that took its place gets the cursor.
+        """
         self.clear_text_selection()
+        focused_id = self._id_at(self.cursor) if keep_cursor else None
+        anchor_id = self._id_at(self.anchor_index)
+        old_cursor = self.cursor
         self._items = list(new_items)
         self.top_skip = 0
         if not self._items:
@@ -243,12 +251,39 @@ class WindowedList(Widget, Generic[T]):
             self.refresh()
             return
 
-        if not keep_cursor or self.cursor >= len(self._items):
+        if not keep_cursor:
             self.cursor = 0
             self._adjust_cursor_to_selectable(1)
+        else:
+            new_index = self._index_of_id(focused_id)
+            if new_index is None:
+                self.cursor = min(old_cursor, len(self._items) - 1)
+                self._adjust_cursor_to_selectable(1)
+            else:
+                # Scrolled down: keep the cursor on its screen row. At the
+                # top, stay there so a chat that jumps to the top is seen.
+                if self.top_index > 0:
+                    self.top_index = max(0, self.top_index + new_index - old_cursor)
+                self.cursor = new_index
+
+        if self.anchor_index is not None:
+            self.anchor_index = self._index_of_id(anchor_id)
 
         self._ensure_cursor_visible()
         self.refresh()
+
+    def _id_at(self, index: int | None) -> Any:
+        if index is None or not (0 <= index < len(self._items)):
+            return None
+        return self._id_fn(self._items[index])
+
+    def _index_of_id(self, item_id: Any) -> int | None:
+        if item_id is None:
+            return None
+        for idx, item in enumerate(self._items):
+            if self._id_fn(item) == item_id:
+                return idx
+        return None
 
     def get_selected_items(self) -> list[T]:
         """Return list of currently selected items in order."""
