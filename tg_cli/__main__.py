@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import logging
-from tg_cli.app import TelegramCLIApp
+import sys
+from tg_cli.app import RESET_TERMINAL_TITLE, TelegramCLIApp
 from tg_cli.paths import get_app_data_dir, get_db_path
 from tg_cli.telegram.fake import FakeGateway
 from tg_cli.telegram.telethon_gw import TelethonGateway
@@ -52,8 +54,18 @@ def setup_windows_console() -> None:
         pass
 
 
+def reset_terminal_title() -> None:
+    """The tab would keep the last unread count after the app exits."""
+    try:
+        sys.stdout.write(RESET_TERMINAL_TITLE)
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def main() -> None:
     setup_windows_console()
+    atexit.register(reset_terminal_title)
 
     parser = argparse.ArgumentParser(
         description="Keyboard-first Telegram client for Windows Terminal"

@@ -20,6 +20,17 @@ from tg_cli.ui.screens.chats import ChatsScreen
 # Screen imports pull Textual in before the width patch runs inside render.
 apply_terminal_cell_width()
 
+APP_NAME = "tg-cli"
+
+# OSC 0 sets the tab title in Windows Terminal and most other terminals.
+# An empty title hands the tab back to the shell.
+RESET_TERMINAL_TITLE = "\x1b]0;\x07"
+
+
+def terminal_title(unread: int) -> str:
+    """Tab title with the unread count up front, as browsers do."""
+    return f"({unread}) {APP_NAME}" if unread > 0 else APP_NAME
+
 
 class TelegramCLIApp(App[None]):
     """Telegram CLI Textual Application."""
@@ -43,8 +54,12 @@ class TelegramCLIApp(App[None]):
         self.gateway = gateway or FakeGateway()
         self.db_error = db_error
         self._last_ctrl_c_time: float = 0.0
+        self._terminal_title: str | None = None
 
     def on_mount(self) -> None:
+        # Polling also catches local changes such as `r`, which emit no event.
+        self.set_interval(2.0, self.update_terminal_title)
+        self.update_terminal_title()
         if self.db_error is not None:
             from tg_cli.ui.screens.db_error import DatabaseErrorScreen
             path, err = self.db_error
@@ -58,6 +73,26 @@ class TelegramCLIApp(App[None]):
             self.push_screen(ChatsScreen(gateway=self.gateway, account=accounts[0]))
         else:
             self.push_screen(AccountsScreen(gateway=self.gateway))
+
+    def update_terminal_title(self) -> None:
+        """Unread across all accounts. Muted and archived chats do not count."""
+        try:
+            counts = self.gateway.get_account_unread_counts()
+        except Exception:
+            return
+        title = terminal_title(sum(counts.values()))
+        if title != self._terminal_title:
+            self._terminal_title = title
+            self._write_terminal_title(title)
+
+    def _write_terminal_title(self, title: str) -> None:
+        driver = getattr(self, "_driver", None)
+        if driver is None:
+            return
+        try:
+            driver.write(f"\x1b]0;{title}\x07")
+        except Exception:
+            pass
 
     def open_account(self, account: Account) -> None:
         """Navigate to chat list screen for the given account."""

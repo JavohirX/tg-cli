@@ -28,6 +28,7 @@
    - *JetBrains Mono Nerd Font*
 2. **Keybindings**: Windows Terminal defaults `Ctrl+Shift+T` to new tab and `Alt+Arrow` to pane focus. `tg-cli` deliberately avoids colliding with these.
 3. **Paging**: `PageUp` and `PageDown` scroll the chat/message list inside the client rather than the Windows Terminal terminal scrollback buffer.
+4. **Tab title**: the tab shows the unread count across all accounts, such as `(4) tg-cli`. Muted and archived chats do not count.
 
 ---
 
