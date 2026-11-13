@@ -286,6 +286,10 @@ def map_telethon_dialog_to_chat(dialog: Any, account_id: int) -> Chat:
     kind = determine_chat_kind(entity) if entity else ChatKind.USER
 
     unread_count = int(getattr(dialog, "unread_count", 0))
+    # A chat marked unread by hand has no unread messages, only this flag.
+    raw_dialog = getattr(dialog, "dialog", None)
+    if unread_count == 0 and getattr(raw_dialog, "unread_mark", False):
+        unread_count = 1
     pinned = bool(getattr(dialog, "pinned", False))
     archived = bool(getattr(dialog, "archived", False) or getattr(dialog, "folder_id", 0) == 1)
     muted = notify_is_muted(dialog_notify_settings(dialog))

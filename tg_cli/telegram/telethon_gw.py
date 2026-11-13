@@ -464,11 +464,12 @@ class TelethonGateway:
         read: bool = True,
     ) -> None:
         repo_mark_chats_read(self.conn, account_id, chat_ids, read)
-        if read:
+        if chat_ids:
             self.worker.submit_command(
                 MarkChatReadCmd(
                     account_id=account_id,
                     chat_ids=chat_ids,
+                    read=read,
                 )
             )
 

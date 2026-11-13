@@ -660,6 +660,40 @@ def test_archive_and_mute_are_sent_to_telegram(tmp_path):
         gw.stop()
 
 
+def test_mark_unread_and_read_reach_telegram(tmp_path):
+    from telethon.tl.functions.messages import MarkDialogUnreadRequest
+
+    db_file = tmp_path / "gw_unread.db"
+    gw = TelethonGateway(db_path=db_file)
+    gw.start()
+    mock_client = MockTelethonClient()
+    try:
+        upsert_account(gw.conn, Account(user_id=777, phone="+12025550177", display_name="Mock User"))
+        upsert_chats(gw.conn, [Chat(account_id=777, chat_id=30, title="Later")])
+        gw.worker.clients[777] = mock_client
+
+        def unread_flags():
+            return [
+                r.unread for r in mock_client.requests
+                if isinstance(r, MarkDialogUnreadRequest)
+            ]
+
+        gw.mark_chats_read(777, [30], read=False)
+        assert _wait_until(lambda: unread_flags() == [True])
+        assert get_chats(gw.conn, 777)[0].unread_count == 1
+
+        gw.mark_chats_read(777, [30], read=True)
+        assert _wait_until(lambda: unread_flags() == [True, False])
+        assert get_chats(gw.conn, 777)[0].unread_count == 0
+
+        # A plain read, such as each live message, does not ask again.
+        gw.mark_chats_read(777, [30], read=True)
+        gw.mark_chats_read(777, [30], read=False)
+        assert _wait_until(lambda: unread_flags() == [True, False, True])
+    finally:
+        gw.stop()
+
+
 def test_archive_failure_restores_the_local_flag(tmp_path):
     db_file = tmp_path / "gw_archive_fail.db"
     gw = TelethonGateway(db_path=db_file)

@@ -93,6 +93,24 @@ def test_map_dialog():
     assert chat.last_preview == "Hello world!"
 
 
+def test_map_dialog_counts_a_hand_marked_unread_chat():
+    dialog = SimpleNamespace(
+        id=9,
+        name="Later",
+        unread_count=0,
+        pinned=False,
+        archived=False,
+        folder_id=None,
+        entity=None,
+        notify_settings=None,
+        dialog=SimpleNamespace(unread_mark=True, notify_settings=None),
+        message=None,
+    )
+    assert map_telethon_dialog_to_chat(dialog, account_id=1).unread_count == 1
+    dialog.dialog.unread_mark = False
+    assert map_telethon_dialog_to_chat(dialog, account_id=1).unread_count == 0
+
+
 def test_map_dialog_reads_archive_and_mute_from_telegram():
     future = datetime(2038, 1, 19, tzinfo=timezone.utc)
     past = datetime(2020, 1, 1, tzinfo=timezone.utc)

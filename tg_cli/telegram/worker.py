@@ -17,7 +17,8 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 from telethon import TelegramClient, errors
 from telethon.sessions import SQLiteSession
-from telethon.tl.types import User
+from telethon.tl.functions.messages import MarkDialogUnreadRequest
+from telethon.tl.types import InputDialogPeer, User
 from tg_cli.config import get_proxy_config
 from tg_cli.domain.files import send_groups, upload_label, upload_progress_line, upload_weights
 from tg_cli.domain.models import (
@@ -557,9 +558,11 @@ class MarkChatReadCmd(WorkerCommand):
         self,
         account_id: int,
         chat_ids: Sequence[int],
+        read: bool = True,
     ) -> None:
         self.account_id = account_id
         self.chat_ids = chat_ids
+        self.read = read
 
 
 class ArchiveChatsCmd(WorkerCommand):
@@ -629,6 +632,9 @@ class TelethonWorker(threading.Thread):
         self._login_code_watchers: list[tuple[Any, Any]] = []
         self._next_delete_flush = 0.0
         self._deletes_in_flight: set[tuple[int, int]] = set()
+        # Chats Telegram may have flagged "marked as unread". Reading one of
+        # these also clears the flag; reading any other chat does not ask.
+        self._unread_marked: set[tuple[int, int]] = set()
 
     def run(self) -> None:
         """Entrypoint for dedicated background thread."""
@@ -1635,9 +1641,24 @@ class TelethonWorker(threading.Thread):
                     entity = await client.get_input_entity(cid)
                 except Exception:
                     entity = cid
-                await client.send_read_acknowledge(entity)
+                key = (cmd.account_id, cid)
+                if cmd.read:
+                    await client.send_read_acknowledge(entity)
+                    # "Marked as unread" is its own flag. Reading the history
+                    # leaves it set, so clients clear it themselves.
+                    if key not in self._unread_marked:
+                        continue
+                    self._unread_marked.discard(key)
+                else:
+                    self._unread_marked.add(key)
+                await client(
+                    MarkDialogUnreadRequest(
+                        peer=InputDialogPeer(peer=entity),
+                        unread=not cmd.read,
+                    )
+                )
         except Exception as e:
-            logger.warning(f"Failed to acknowledge read for chat: {type(e).__name__}: {e}")
+            logger.warning(f"Failed to sync read state for chat: {type(e).__name__}: {e}")
 
     async def _handle_archive_chats(self, cmd: ArchiveChatsCmd) -> bool:
         """Move peers into Telegram's archive folder, or back to the main list."""
@@ -1966,6 +1987,8 @@ class TelethonWorker(threading.Thread):
         pending = pending_delete_ids(self.conn, user_id)
         async for dialog in client.iter_dialogs(limit=None, archived=archived):
             chat = map_telethon_dialog_to_chat(dialog, user_id)
+            if getattr(getattr(dialog, "dialog", None), "unread_mark", False):
+                self._unread_marked.add((user_id, chat.chat_id))
             # The request decides the archive bit. A missing folder_id is
             # not "main list": Telethon only sets Dialog.archived when the
             # field is present, and the combined dialog list omits it.
