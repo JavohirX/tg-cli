@@ -325,6 +325,21 @@ def map_telethon_dialog_to_chat(dialog: Any, account_id: int) -> Chat:
     )
 
 
+def _link_spans(msg: Any) -> list[dict[str, Any]]:
+    """Text links hide their target behind other words. Bare URLs are in the text."""
+    spans: list[dict[str, Any]] = []
+    for entity in getattr(msg, "entities", None) or []:
+        url = getattr(entity, "url", None)
+        if type(entity).__name__ == "MessageEntityTextUrl" and url:
+            spans.append({
+                "type": "text_url",
+                "offset": int(getattr(entity, "offset", 0)),
+                "length": int(getattr(entity, "length", 0)),
+                "url": str(url),
+            })
+    return spans
+
+
 def map_telethon_message_to_domain(msg: Any, account_id: int, chat_id: int) -> Message:
     """Map a Telethon Message to a Message domain model."""
     msg_id = int(getattr(msg, "id", 0))
@@ -367,6 +382,7 @@ def map_telethon_message_to_domain(msg: Any, account_id: int, chat_id: int) -> M
         kind=kind,
         plain_text=plain_text,
         caption=caption,
+        entity_spans=_link_spans(msg),
         reply_id=reply_id,
         forward_label=fwd_label,
         edited=edited,

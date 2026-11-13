@@ -90,6 +90,7 @@ class ChatsScreen(Screen):
             renderer=self._render_row,
             id_fn=lambda c: c.chat_id,
             is_selectable_fn=lambda c: True,
+            item_noun="chats",
             id="chat-window-list",
             enable_digit_motion=False,
             stripe=True,
@@ -363,7 +364,8 @@ class ChatsScreen(Screen):
             return
         target_ids = [c.chat_id for c in targets]
         old_archived = {c.chat_id: c.archived for c in targets}
-        new_state = not targets[0].archived
+        # Mixed selection: archive the lot. Only an all-archived one unarchives.
+        new_state = not all(c.archived for c in targets)
 
         self.gateway.archive_chats(self.account.user_id, target_ids, archived=new_state)
         self.chat_list.clear_selection()
@@ -383,7 +385,8 @@ class ChatsScreen(Screen):
             return
         target_ids = [c.chat_id for c in targets]
         old_muted = {c.chat_id: c.muted for c in targets}
-        new_state = not targets[0].muted
+        # Mixed selection: mute the lot. Only an all-muted one unmutes.
+        new_state = not all(c.muted for c in targets)
 
         self.gateway.mute_chats(self.account.user_id, target_ids, muted=new_state)
         self.chat_list.clear_selection()

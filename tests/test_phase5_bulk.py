@@ -195,3 +195,36 @@ def test_muted_archived_chat_survives_restart(tmp_path):
     assert c.muted is True
     assert c.archived is True
     assert c.unread_count == 5
+
+
+@pytest.mark.asyncio
+async def test_mixed_selection_archives_and_mutes_all_of_it():
+    gw = FakeGateway(chat_count=15)
+    acc = gw.get_accounts()[0]
+    chats = gw.get_chats(acc.user_id)
+    first, second = chats[0], chats[1]
+    # The old rule flipped the first chat's state, which would unmute both.
+    first.muted = True
+    second.muted = False
+
+    app = ChatsPilotApp(gw, acc)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        screen.chat_list.cursor = 1
+        assert screen.chat_list.get_focused_item().chat_id == first.chat_id
+        await pilot.press("space", "j", "space", "m")
+        await pilot.pause()
+        assert gw.get_chat(acc.user_id, first.chat_id).muted
+        assert gw.get_chat(acc.user_id, second.chat_id).muted
+
+
+@pytest.mark.asyncio
+async def test_select_all_prompt_names_what_it_selects():
+    gw = FakeGateway(chat_count=80)
+    acc = gw.get_accounts()[0]
+    app = ChatsPilotApp(gw, acc)
+    async with app.run_test() as pilot:
+        screen = app.screen
+        await pilot.press("V")
+        await pilot.pause()
+        assert "chats? (y/n)" in screen.status_bar.prompt_message

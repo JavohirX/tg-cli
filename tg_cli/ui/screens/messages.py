@@ -7,6 +7,7 @@ live message inserts with '↓ N new', and Tab toggling between LIST and WRITE f
 from __future__ import annotations
 
 import threading
+import webbrowser
 from collections import OrderedDict
 from datetime import datetime, timezone
 from functools import partial
@@ -22,6 +23,7 @@ from textual.events import DescendantFocus, Key
 from textual.screen import Screen
 from textual.widgets import Input, Static
 from tg_cli.domain.files import paste_disposition, upload_label, upload_progress_line
+from tg_cli.domain.links import message_links
 from tg_cli.ui.paste import PasteInput, SendMediaDialog, claim_paste
 from tg_cli.domain.models import (
     Account,
@@ -99,6 +101,7 @@ class MessagesScreen(Screen):
         Binding("t", "transcribe_focused", "Transcribe", show=False),
         Binding("T", "retranscribe_focused", "Re-transcribe", show=False),
         Binding("y", "yank_focused", "Copy Text", show=False),
+        Binding("o", "open_link", "Open Link", show=False),
         Binding("z,Z", "toggle_expand", "Expand/Collapse", show=False, priority=True),
         Binding("?", "show_help", "Help", show=False),
         Binding("f1", "show_help", "Help", show=False),
@@ -148,6 +151,9 @@ class MessagesScreen(Screen):
         self._paste_skipped: int = 0
         # Voice messages with a download or transcription still running.
         self._transcribing: set[int] = set()
+        # (message_id, index) of the link `o` opened last, so `o` again
+        # on the same message opens the next one.
+        self._link_cycle: tuple[int, int] | None = None
 
         self.message_list = WindowedList[Any](
             items=[],
@@ -155,6 +161,7 @@ class MessagesScreen(Screen):
             id_fn=lambda item: item.identity,
             is_selectable_fn=lambda item: isinstance(item, Message),
             item_height_fn=self._get_item_height,
+            item_noun="messages",
             id="message-window-list",
             enable_digit_motion=False,
             stripe=True,
@@ -949,6 +956,31 @@ class MessagesScreen(Screen):
             else:
                 self.status_bar.set_status("Clipboard copy failed.", is_error=True)
 
+    def action_open_link(self) -> None:
+        if self.is_write_mode:
+            return
+        focused = self.message_list.get_focused_item()
+        if not isinstance(focused, Message):
+            return
+        links = message_links(focused)
+        if not links:
+            self.status_bar.set_status("No link in this message.")
+            return
+        index = 0
+        if self._link_cycle is not None and self._link_cycle[0] == focused.message_id:
+            index = (self._link_cycle[1] + 1) % len(links)
+        self._link_cycle = (focused.message_id, index)
+        url = links[index]
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            self.status_bar.set_status(f"Cannot open link: {exc}", is_error=True)
+            return
+        status = f"Opened {url}"
+        if len(links) > 1:
+            status += f" ({index + 1} of {len(links)}, o for next)"
+        self.status_bar.set_status(status)
+
     def action_toggle_expand(self) -> None:
         """Expand the message that shows the hint, or collapse it again.
 
@@ -1236,6 +1268,8 @@ class MessagesScreen(Screen):
                     self.action_retranscribe_focused()
                 case "yank_text":
                     self.action_yank_focused()
+                case "open_link":
+                    self.action_open_link()
                 case "toggle_expand":
                     self.action_toggle_expand()
                 case "filter":

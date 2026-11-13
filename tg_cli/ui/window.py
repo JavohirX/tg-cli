@@ -196,6 +196,7 @@ class WindowedList(Widget, Generic[T]):
         is_selectable_fn: Callable[[T], bool] | None = None,
         item_height_fn: Callable[[T], int] | None = None,
         stripe: bool = False,
+        item_noun: str = "items",
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -211,6 +212,8 @@ class WindowedList(Widget, Generic[T]):
         # One near-black band per item. Off for accounts and sessions; the
         # chat list and the message list turn it on.
         self.stripe = stripe
+        # Plural shown in prompts, such as "Select all 120 chats?".
+        self.item_noun = item_noun
 
         self.cursor: int = 0
         self.top_index: int = 0
@@ -710,7 +713,7 @@ class WindowedList(Widget, Generic[T]):
         if count > 50:
             self.post_message(
                 self.ConfirmationPrompt(
-                    prompt=f"Select all {count} chats? (y/n)",
+                    prompt=f"Select all {count} {self.item_noun}? (y/n)",
                     on_confirm=do_select,
                 )
             )

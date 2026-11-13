@@ -86,11 +86,10 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 |---|---|
 | `j` / `↓` | Move cursor down |
 | `k` / `↑` | Move cursor up |
-| `5j` / `10k` | Jump by count prefix |
-| `d` / `u` | Half-page down / up |
+| `Ctrl+D` / `Ctrl+U` | Half-page down / up |
 | `PageDown` / `PageUp` | Full-page down / up |
-| `g` / `Home` | Jump to top (triggers older history load in chat) |
-| `G` / `End` | Jump to bottom |
+| `Home` | Jump to top (triggers older history load in chat) |
+| `End` | Jump to bottom |
 | `v` | Start visual range selection anchor |
 | `Space` | Toggle selection of current item |
 | `V` | Select all items in view (confirms if > 50) |
@@ -101,8 +100,8 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 | `Enter` | Open selected chat |
 | `/` | Filter chats by name or preview |
 | `[` / `]` | Switch folder tabs (All, Personal, Work, Archive) |
-| `a` | Toggle Archive (undoable 5s) |
-| `m` | Toggle Mute (undoable 5s) |
+| `a` | Toggle Archive (undoable 5s). A mixed selection is all archived |
+| `m` | Toggle Mute (undoable 5s). A mixed selection is all muted |
 | `r` | Mark as read (undoable 5s) |
 | `R` / `Shift+R` | Mark as unread (undoable 5s) |
 | `d` | Delete chat for me (confirms if > 10, undoable 5s) |
@@ -122,6 +121,7 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 | `t` | Transcribe voice message with Gemini (cached) |
 | `T` | Force re-transcribe voice message (bypasses cache) |
 | `y` | Copy message text to system clipboard |
+| `o` | Open the link in the focused message; `o` again opens the next one |
 | `z` | Toggle message clamping (expand/collapse > 4 lines) |
 | `/` | Search loaded messages or query older history from Telegram |
 | `Esc` | Clear reply/edit context, defocus composer, or return to chat list |
