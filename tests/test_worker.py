@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from pathlib import Path
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import pytest
@@ -58,6 +59,13 @@ class MockTelethonClient:
 
     async def get_entity(self, peer):
         return peer
+
+    async def get_messages(self, entity, ids=None, **kwargs):
+        return next((m for m in self.messages if m.id == ids), None)
+
+    async def download_media(self, message, file=None, **kwargs):
+        Path(file).write_bytes(b"OggS" + str(message.id).encode())
+        return file
 
     async def iter_messages(self, entity, limit=50, offset_id=0):
         count = 0
@@ -807,6 +815,28 @@ def test_new_placeholder_ids_start_below_last_runs(tmp_path):
         assert gw._temp_msg_counter == -8
     finally:
         gw.conn.close()
+
+
+def test_voice_download_saves_the_real_audio(tmp_path):
+    gw = TelethonGateway(db_path=tmp_path / "gw_voice.db")
+    gw.start()
+    voice = MockTelethonMessage(msg_id=55, text="")
+    voice.media = object()
+    mock_client = MockTelethonClient(messages=[voice, MockTelethonMessage(msg_id=56, text="hi")])
+    try:
+        gw.worker.clients[777] = mock_client
+        path = gw.download_voice_file(777, 40, 55)
+        try:
+            assert path.read_bytes() == b"OggS55"
+        finally:
+            path.unlink(missing_ok=True)
+
+        with pytest.raises(RuntimeError, match="no longer on Telegram"):
+            gw.download_voice_file(777, 40, 56)
+        with pytest.raises(RuntimeError, match="offline"):
+            gw.download_voice_file(778, 40, 55)
+    finally:
+        gw.stop()
 
 
 def test_quit_sends_a_delete_that_was_still_undoable(tmp_path):

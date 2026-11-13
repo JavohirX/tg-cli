@@ -4,6 +4,7 @@ This is the only module allowed to import Telethon and connect the UI to the bac
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -61,6 +62,7 @@ from tg_cli.telegram.worker import (
     CancelQrLoginCmd,
     ConnectAccountsCmd,
     DisconnectAccountCmd,
+    DownloadVoiceCmd,
     EditMessageCmd,
     FetchMessagesCmd,
     FetchRolesCmd,
@@ -80,6 +82,10 @@ from tg_cli.telegram.worker import (
     TelethonWorker,
     UpdateProfileCmd,
 )
+
+
+# A voice note is small, but a slow proxy can take a while.
+VOICE_DOWNLOAD_TIMEOUT = 120.0
 
 
 class TelethonGateway:
@@ -569,11 +575,24 @@ class TelethonGateway:
         repo_upsert_transcript(self.conn, transcript)
 
     def download_voice_file(self, account_id: int, chat_id: int, message_id: int) -> Path:
+        """Wait for the worker to save the voice note. Call it off the UI thread."""
         import tempfile
-        tmp = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
-        tmp.write(b"OggS mock audio data")
-        tmp.close()
-        return Path(tmp.name)
+        fd, name = tempfile.mkstemp(prefix="tg-cli-voice-", suffix=".ogg")
+        os.close(fd)
+        target = Path(name)
+        q: queue.Queue[Path | Exception] = queue.Queue()
+        self.worker.submit_command(
+            DownloadVoiceCmd(account_id, chat_id, message_id, target, q)
+        )
+        try:
+            result = q.get(timeout=VOICE_DOWNLOAD_TIMEOUT)
+        except queue.Empty:
+            target.unlink(missing_ok=True)
+            raise TimeoutError("Voice download timed out") from None
+        if isinstance(result, Exception):
+            target.unlink(missing_ok=True)
+            raise result
+        return result
 
     def get_account_unread_counts(self) -> dict[int, int]:
         return repo_get_account_unread_counts(self.conn)

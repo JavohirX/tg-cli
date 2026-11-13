@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 from collections import OrderedDict
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 from rich.console import Group, RenderableType
@@ -135,6 +136,8 @@ class MessagesScreen(Screen):
         self.filter_input = PasteInput(placeholder="Search messages...", id="filter-input")
         self._pending_file_paste: list[str] = []
         self._paste_skipped: int = 0
+        # Voice messages with a download or transcription still running.
+        self._transcribing: set[int] = set()
 
         self.message_list = WindowedList[Any](
             items=[],
@@ -860,52 +863,79 @@ class MessagesScreen(Screen):
                 self.message_list.refresh()
                 return
 
-        # Perform transcription
-        self.status_bar.set_status(f"Downloading voice message #{focused.message_id}...")
+        message_id = focused.message_id
+        if message_id in self._transcribing:
+            self.status_bar.set_status("Already transcribing this voice message.")
+            return
+        self._transcribing.add(message_id)
+        self.status_bar.set_status(f"Downloading voice message #{message_id}...")
 
+        from tg_cli.transcribe.gemini import GeminiTranscriber
+        transcriber = getattr(self.app, "transcriber", None) or GeminiTranscriber()
+        # The download and the Gemini call take seconds. On the UI thread
+        # they froze every key until they finished.
+        self.run_worker(
+            partial(self._transcribe_off_thread, message_id, transcriber),
+            thread=True,
+            group="transcribe",
+            exit_on_error=False,
+        )
+
+    def _transcribe_off_thread(self, message_id: int, transcriber: Any) -> None:
+        """Runs on a worker thread. SQLite and widgets stay on the UI thread."""
         temp_audio: Path | None = None
+        text: str | None = None
+        error: str | None = None
         try:
             temp_audio = self.gateway.download_voice_file(
                 self.account.user_id,
                 self.chat.chat_id,
-                focused.message_id,
+                message_id,
             )
-            self.status_bar.set_status("Transcribing audio with Gemini...")
-
-            from tg_cli.transcribe.gemini import GeminiTranscriber
-            transcriber = getattr(self.app, "transcriber", None) or GeminiTranscriber()
-
-            transcript_text = transcriber.transcribe_audio(temp_audio)
-
-            record = Transcript(
-                account_id=self.account.user_id,
-                chat_id=self.chat.chat_id,
-                message_id=focused.message_id,
-                text=transcript_text,
-                model="gemini",
-                created_at=datetime.now(timezone.utc),
+            self.app.call_from_thread(
+                self.status_bar.set_status, "Transcribing audio with Gemini..."
             )
-            self.gateway.save_transcript(record)
-            self.status_bar.set_status(f"Transcribed: {transcript_text[:50]}")
-            self.message_list.refresh()
+            text = transcriber.transcribe_audio(temp_audio)
         except Exception as exc:
-            err_msg = str(exc)
-            fail_record = Transcript(
-                account_id=self.account.user_id,
-                chat_id=self.chat.chat_id,
-                message_id=focused.message_id,
-                error=err_msg,
-                created_at=datetime.now(timezone.utc),
-            )
-            self.gateway.save_transcript(fail_record)
-            self.status_bar.set_status(f"Transcription failed: {err_msg}", is_error=True)
-            self.message_list.refresh()
+            error = str(exc) or type(exc).__name__
         finally:
-            if temp_audio is not None and temp_audio.exists():
+            if temp_audio is not None:
                 try:
                     temp_audio.unlink(missing_ok=True)
                 except Exception:
                     pass
+        try:
+            self.app.call_from_thread(self._finish_transcription, message_id, text, error)
+        except Exception:
+            pass
+
+    def _finish_transcription(
+        self, message_id: int, text: str | None, error: str | None
+    ) -> None:
+        self._transcribing.discard(message_id)
+        now = datetime.now(timezone.utc)
+        if error is None:
+            record = Transcript(
+                account_id=self.account.user_id,
+                chat_id=self.chat.chat_id,
+                message_id=message_id,
+                text=text or "",
+                model="gemini",
+                created_at=now,
+            )
+            status = f"Transcribed: {(text or '')[:50]}"
+        else:
+            record = Transcript(
+                account_id=self.account.user_id,
+                chat_id=self.chat.chat_id,
+                message_id=message_id,
+                error=error,
+                created_at=now,
+            )
+            status = f"Transcription failed: {error}"
+        self.gateway.save_transcript(record)
+        self.status_bar.set_status(status, is_error=error is not None)
+        self.message_list.refresh()
 
     def action_yank_focused(self) -> None:
         if self.is_write_mode:

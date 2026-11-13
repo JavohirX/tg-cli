@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Sequence
 from telethon import TelegramClient, errors
 from telethon.sessions import SQLiteSession
@@ -423,6 +424,24 @@ class GetSessionsCmd(WorkerCommand):
         self.result_queue = result_queue
 
 
+class DownloadVoiceCmd(WorkerCommand):
+    """Save one voice note to `target`. The queue gets the path or the error."""
+
+    def __init__(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_id: int,
+        target: Path,
+        result_queue: queue.Queue,
+    ) -> None:
+        self.account_id = account_id
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.target = target
+        self.result_queue = result_queue
+
+
 class RevokeSessionCmd(WorkerCommand):
     def __init__(self, user_id: int, session_hash: int, result_queue: queue.Queue) -> None:
         self.user_id = user_id
@@ -664,6 +683,8 @@ class TelethonWorker(threading.Thread):
             await self._handle_start_qr_login(cmd)
         elif isinstance(cmd, CancelQrLoginCmd):
             await self._cleanup_login_client()
+        elif isinstance(cmd, DownloadVoiceCmd):
+            await self._handle_download_voice(cmd)
         elif isinstance(cmd, GetSessionsCmd):
             await self._handle_get_sessions(cmd)
         elif isinstance(cmd, RevokeSessionCmd):
@@ -1100,6 +1121,26 @@ class TelethonWorker(threading.Thread):
             except Exception as e:
                 self._emit("login_error", {"error": f"QR error: {str(e)}"})
                 break
+
+    async def _handle_download_voice(self, cmd: DownloadVoiceCmd) -> None:
+        try:
+            client = self.clients.get(cmd.account_id)
+            if client is None:
+                raise RuntimeError("Account is offline")
+            try:
+                entity = await client.get_input_entity(cmd.chat_id)
+            except Exception:
+                entity = cmd.chat_id
+            msg = await client.get_messages(entity, ids=cmd.message_id)
+            if msg is None or getattr(msg, "media", None) is None:
+                raise RuntimeError("Voice message is no longer on Telegram")
+            saved = await client.download_media(msg, file=str(cmd.target))
+            if not saved:
+                raise RuntimeError("Telegram returned no audio")
+            cmd.result_queue.put(Path(saved))
+        except Exception as e:
+            logger.warning(f"Voice download failed: {type(e).__name__}: {e}")
+            cmd.result_queue.put(e)
 
     async def _handle_get_sessions(self, cmd: GetSessionsCmd) -> None:
         client = self.clients.get(cmd.user_id)

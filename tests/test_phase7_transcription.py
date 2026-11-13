@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
@@ -49,6 +50,69 @@ class TranscribePilotApp(App):
         )
 
 
+async def _transcription_done(app, pilot) -> None:
+    """The work runs on a thread; its result comes back through call_from_thread."""
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+class SlowTranscriber(MockTranscriber):
+    """Blocks inside transcribe_audio until the test lets it go."""
+
+    def __init__(self) -> None:
+        super().__init__(response_text="done")
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def transcribe_audio(self, audio_path: Path, model: str | None = None) -> str:
+        self.started.set()
+        self.release.wait(timeout=5)
+        return super().transcribe_audio(audio_path, model)
+
+
+@pytest.mark.asyncio
+async def test_transcription_leaves_the_ui_responsive():
+    gw = FakeGateway(chat_count=3)
+    acc = gw.get_accounts()[0]
+    chat = gw.get_chats(acc.user_id)[0]
+    gw.messages[(acc.user_id, chat.chat_id)].append(
+        Message(
+            account_id=acc.user_id,
+            chat_id=chat.chat_id,
+            message_id=556,
+            sender_name="Alice",
+            kind=MessageKind.VOICE,
+            plain_text="[voice]",
+        )
+    )
+    slow = SlowTranscriber()
+    app = TranscribePilotApp(gw, acc, chat, slow)
+
+    async with app.run_test() as pilot:
+        screen = app.screen
+        screen.message_list.cursor = next(
+            i for i, it in enumerate(screen.message_list.items)
+            if getattr(it, "message_id", None) == 556
+        )
+        await pilot.press("t")
+        assert slow.started.wait(timeout=5)
+
+        # A second press while it runs does not start another one.
+        await pilot.press("t")
+        await pilot.pause()
+        assert "Already transcribing" in screen.status_bar.status_message
+
+        # Keys still work while Gemini is busy.
+        await pilot.press("k")
+        await pilot.pause()
+        assert screen.message_list.get_focused_item().message_id != 556
+
+        slow.release.set()
+        await _transcription_done(app, pilot)
+        assert slow.call_count == 1
+        assert gw.get_transcript(acc.user_id, chat.chat_id, 556).text == "done"
+
+
 @pytest.mark.asyncio
 async def test_transcription_caching_and_cleanup():
     gw = FakeGateway(chat_count=3)
@@ -84,7 +148,7 @@ async def test_transcription_caching_and_cleanup():
 
         # 1. First 't' -> Should call network/transcriber once
         await pilot.press("t")
-        await pilot.pause()
+        await _transcription_done(app, pilot)
 
         assert mock.call_count == 1
         # Check transcript saved in gateway
@@ -98,13 +162,13 @@ async def test_transcription_caching_and_cleanup():
 
         # 2. Second 't' on same message -> Should NOT call network again
         await pilot.press("t")
-        await pilot.pause()
+        await _transcription_done(app, pilot)
 
         assert mock.call_count == 1  # Still 1! Used cached transcript
 
         # 3. 'T' (shift+t) -> Forced re-transcription -> MUST call network again
         await pilot.press("T")
-        await pilot.pause()
+        await _transcription_done(app, pilot)
 
         assert mock.call_count == 2  # Incremented to 2!
         # Verify temp audio file is gone again
@@ -145,7 +209,7 @@ async def test_transcription_failure_and_retry():
 
         # 1. First 't' fails
         await pilot.press("t")
-        await pilot.pause()
+        await _transcription_done(app, pilot)
 
         assert mock.call_count == 1
         failed_rec = gw.get_transcript(acc.user_id, chat.chat_id, 777)
@@ -158,7 +222,7 @@ async def test_transcription_failure_and_retry():
         # 2. Fix the error and press 't' again to retry
         mock.should_fail = False
         await pilot.press("t")
-        await pilot.pause()
+        await _transcription_done(app, pilot)
 
         assert mock.call_count == 2
         success_rec = gw.get_transcript(acc.user_id, chat.chat_id, 777)
