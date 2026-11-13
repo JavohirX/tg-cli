@@ -58,6 +58,10 @@ async def test_login_flow_steps():
             await pilot.press("enter")
             await pilot.pause()
 
+        if login_screen.step == "qr":
+            await pilot.press("p")
+            await pilot.pause()
+
         assert login_screen.step == "phone"
 
         # Submit phone

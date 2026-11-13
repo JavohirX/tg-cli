@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Sequence
 from tg_cli.domain.models import (
@@ -262,6 +263,150 @@ def delete_chats(conn: sqlite3.Connection, account_id: int, chat_ids: Sequence[i
         )
 
 
+# Seconds the chat list waits before a delete is sent to Telegram.
+# Matches the undo toast on the chat screen.
+CHAT_DELETE_UNDO_SECONDS = 5.0
+
+
+def schedule_chat_deletes(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_ids: Sequence[int],
+    delay: float = CHAT_DELETE_UNDO_SECONDS,
+) -> None:
+    """Remember chats whose Telegram dialog should be deleted after `delay`."""
+    if not chat_ids:
+        return
+    not_before = time.time() + delay
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO pending_chat_deletes (account_id, chat_id, not_before, attempts)
+            VALUES (?, ?, ?, 0)
+            ON CONFLICT(account_id, chat_id) DO UPDATE SET
+                not_before = excluded.not_before,
+                attempts = 0
+            """,
+            [(account_id, int(cid), not_before) for cid in chat_ids],
+        )
+
+
+def cancel_chat_deletes(conn: sqlite3.Connection, account_id: int, chat_ids: Sequence[int]) -> None:
+    """Drop pending Telegram deletes, for example after undo."""
+    if not chat_ids:
+        return
+    placeholders = ",".join("?" for _ in chat_ids)
+    with conn:
+        conn.execute(
+            f"DELETE FROM pending_chat_deletes WHERE account_id = ? AND chat_id IN ({placeholders})",
+            [account_id, *chat_ids],
+        )
+
+
+def pending_delete_ids(conn: sqlite3.Connection, account_id: int) -> set[int]:
+    rows = conn.execute(
+        "SELECT chat_id FROM pending_chat_deletes WHERE account_id = ?",
+        (account_id,),
+    ).fetchall()
+    return {int(r["chat_id"]) for r in rows}
+
+
+def claim_due_chat_deletes(
+    conn: sqlite3.Connection,
+    limit: int = 10,
+    now: float | None = None,
+    force: bool = False,
+) -> list[tuple[int, int, int]]:
+    """Take deletes out of the queue. Returns (account_id, chat_id, attempts).
+
+    Due rows are those whose undo window has closed. `force` takes every
+    pending row, which is how shutdown sends a delete the user did not undo.
+    """
+    current = time.time() if now is None else now
+    with conn:
+        if force:
+            rows = conn.execute(
+                """
+                SELECT account_id, chat_id, attempts
+                FROM pending_chat_deletes
+                ORDER BY not_before ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT account_id, chat_id, attempts
+                FROM pending_chat_deletes
+                WHERE not_before <= ?
+                ORDER BY not_before ASC
+                LIMIT ?
+                """,
+                (current, limit),
+            ).fetchall()
+        claimed = [(int(r["account_id"]), int(r["chat_id"]), int(r["attempts"])) for r in rows]
+        for account_id, chat_id, _attempts in claimed:
+            conn.execute(
+                "DELETE FROM pending_chat_deletes WHERE account_id = ? AND chat_id = ?",
+                (account_id, chat_id),
+            )
+    return claimed
+
+
+def dialog_state_needs_push(conn: sqlite3.Connection, account_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM pushed_dialog_state WHERE account_id = ?",
+        (account_id,),
+    ).fetchone()
+    return row is None
+
+
+def mark_dialog_state_pushed(conn: sqlite3.Connection, account_id: int) -> None:
+    with conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO pushed_dialog_state (account_id) VALUES (?)",
+            (account_id,),
+        )
+
+
+def saved_archive_and_mute_ids(conn: sqlite3.Connection, account_id: int) -> tuple[list[int], list[int]]:
+    """Chat ids this install has archived or muted and not yet told Telegram about."""
+    rows = conn.execute(
+        """
+        SELECT chat_id, archived, muted
+        FROM chats
+        WHERE account_id = ? AND (archived = 1 OR muted = 1)
+        ORDER BY chat_id
+        """,
+        (account_id,),
+    ).fetchall()
+    archived = [int(r["chat_id"]) for r in rows if r["archived"]]
+    muted = [int(r["chat_id"]) for r in rows if r["muted"]]
+    return archived, muted
+
+
+def reschedule_chat_delete(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    attempts: int,
+    delay: float = CHAT_DELETE_UNDO_SECONDS,
+) -> None:
+    """Put a failed delete back, unless undo already restored that chat."""
+    with conn:
+        conn.execute(
+            """
+            INSERT INTO pending_chat_deletes (account_id, chat_id, not_before, attempts)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(account_id, chat_id) DO UPDATE SET
+                not_before = excluded.not_before,
+                attempts = excluded.attempts
+            """,
+            (account_id, chat_id, time.time() + delay, attempts),
+        )
+
+
 def archive_chats(conn: sqlite3.Connection, account_id: int, chat_ids: Sequence[int], archived: bool = True) -> None:
     if not chat_ids:
         return
@@ -337,6 +482,7 @@ def get_messages(
             outgoing=bool(r["outgoing"]),
             send_state=SendState(r["send_state"]),
             is_deleted=bool(r["is_deleted"]),
+            local_path=r["local_path"] or "",
         )
         for r in reversed(rows)
     ]
@@ -372,6 +518,7 @@ def get_message(
         outgoing=bool(row["outgoing"]),
         send_state=SendState(row["send_state"]),
         is_deleted=bool(row["is_deleted"]),
+        local_path=row["local_path"] or "",
     )
 
 
@@ -382,8 +529,9 @@ def upsert_messages(conn: sqlite3.Connection, messages: Sequence[Message]) -> No
             INSERT INTO messages (
                 account_id, chat_id, message_id, sender_id, sender_name,
                 date, kind, plain_text, caption, entity_spans,
-                reply_id, forward_label, edited, outgoing, send_state, is_deleted
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reply_id, forward_label, edited, outgoing, send_state, is_deleted,
+                local_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
                 sender_id = excluded.sender_id,
                 sender_name = excluded.sender_name,
@@ -397,7 +545,8 @@ def upsert_messages(conn: sqlite3.Connection, messages: Sequence[Message]) -> No
                 edited = excluded.edited,
                 outgoing = excluded.outgoing,
                 send_state = excluded.send_state,
-                is_deleted = excluded.is_deleted
+                is_deleted = excluded.is_deleted,
+                local_path = excluded.local_path
             """,
             [
                 (
@@ -417,6 +566,7 @@ def upsert_messages(conn: sqlite3.Connection, messages: Sequence[Message]) -> No
                     1 if m.outgoing else 0,
                     m.send_state.value,
                     1 if m.is_deleted else 0,
+                    m.local_path,
                 )
                 for m in messages
             ],

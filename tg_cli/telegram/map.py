@@ -249,6 +249,35 @@ def determine_message_kind(msg: Any) -> tuple[MessageKind, str]:
     return (MessageKind.OTHER, getattr(msg, "message", "") or "")
 
 
+def notify_is_muted(notify: Any, now: datetime | None = None) -> bool:
+    """True when notify settings mute this peer until a moment still in the future.
+
+    A Telethon Dialog does not copy notify_settings onto itself. The raw
+    dialog object does. mute_until is a datetime, and any datetime is
+    truthy, including a mute that already expired.
+    """
+    until = getattr(notify, "mute_until", None)
+    if until is None or until is False:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if isinstance(until, datetime):
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        return until > current
+    if isinstance(until, (int, float)):
+        return float(until) > current.timestamp()
+    return False
+
+
+def dialog_notify_settings(dialog: Any) -> Any:
+    """Notify settings from a custom Dialog or from the raw TL dialog it wraps."""
+    notify = getattr(dialog, "notify_settings", None)
+    if notify is not None:
+        return notify
+    raw = getattr(dialog, "dialog", None)
+    return getattr(raw, "notify_settings", None)
+
+
 def map_telethon_dialog_to_chat(dialog: Any, account_id: int) -> Chat:
     """Map a Telethon Dialog to a Chat domain model."""
     chat_id = int(getattr(dialog, "id", 0))
@@ -259,10 +288,7 @@ def map_telethon_dialog_to_chat(dialog: Any, account_id: int) -> Chat:
     unread_count = int(getattr(dialog, "unread_count", 0))
     pinned = bool(getattr(dialog, "pinned", False))
     archived = bool(getattr(dialog, "archived", False) or getattr(dialog, "folder_id", 0) == 1)
-
-    # Dialog mute status: check notify_settings
-    notify = getattr(dialog, "notify_settings", None)
-    muted = bool(getattr(notify, "mute_until", None))
+    muted = notify_is_muted(dialog_notify_settings(dialog))
 
     msg = getattr(dialog, "message", None)
     last_message_id = int(getattr(msg, "id", 0)) if msg else 0

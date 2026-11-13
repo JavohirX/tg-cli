@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS messages (
     outgoing INTEGER DEFAULT 0,
     send_state TEXT DEFAULT 'sent',
     is_deleted INTEGER DEFAULT 0,
+    local_path TEXT DEFAULT '',
     PRIMARY KEY (account_id, chat_id, message_id),
     FOREIGN KEY (account_id, chat_id) REFERENCES chats (account_id, chat_id) ON DELETE CASCADE
 );
@@ -103,6 +104,18 @@ CREATE TABLE IF NOT EXISTS history_window (
     FOREIGN KEY (account_id, chat_id) REFERENCES chats (account_id, chat_id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS pending_chat_deletes (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    not_before REAL NOT NULL,
+    attempts INTEGER DEFAULT 0,
+    PRIMARY KEY (account_id, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS pushed_dialog_state (
+    account_id INTEGER PRIMARY KEY
+);
+
 CREATE INDEX IF NOT EXISTS idx_chats_sort ON chats (account_id, archived, pinned DESC, pin_rank ASC, last_date DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages (account_id, chat_id, message_id DESC);
 """
@@ -120,4 +133,12 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     with conn:
         conn.executescript(SCHEMA_SQL)
+    _ensure_column(conn, "messages", "local_path", "TEXT DEFAULT ''")
     return conn
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    """Add a column when an existing database was created before it existed."""
+    names = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in names:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

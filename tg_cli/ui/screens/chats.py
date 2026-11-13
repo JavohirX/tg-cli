@@ -13,6 +13,7 @@ from textual.containers import Container, Vertical
 from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Input, Static
+from tg_cli.ui.paste import PasteInput
 from tg_cli.domain.models import Account, Chat, Folder
 from tg_cli.domain.render import render_chat_row
 from tg_cli.telegram.gateway import Gateway
@@ -83,7 +84,7 @@ class ChatsScreen(Screen):
         self.folder_strip = FolderStrip()
         self.status_bar = StatusBar()
         self.footer_bar = FooterBar(context="chats")
-        self.filter_input = Input(placeholder="Filter chats...", id="filter-input")
+        self.filter_input = PasteInput(placeholder="Filter chats...", id="filter-input")
 
         self.chat_list = WindowedList[Chat](
             items=[],
@@ -92,6 +93,7 @@ class ChatsScreen(Screen):
             is_selectable_fn=lambda c: True,
             id="chat-window-list",
             enable_digit_motion=False,
+            stripe=True,
         )
 
     def compose(self) -> ComposeResult:

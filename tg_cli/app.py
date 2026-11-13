@@ -30,6 +30,7 @@ class TelegramCLIApp(App[None]):
     BINDINGS = [
         Binding("ctrl+c", "handle_ctrl_c", "Cancel/Quit", show=False, priority=True),
         Binding("ctrl+q", "toggle_qr_mode", "Toggle QR", show=False, priority=True),
+        Binding("ctrl+v,shift+insert,ctrl+shift+v", "paste_clipboard", "Paste", show=False),
     ]
 
     def __init__(
@@ -61,6 +62,11 @@ class TelegramCLIApp(App[None]):
     def open_account(self, account: Account) -> None:
         """Navigate to chat list screen for the given account."""
         self.push_screen(ChatsScreen(gateway=self.gateway, account=account))
+
+    def action_paste_clipboard(self) -> None:
+        """Paste system-clipboard text when the focused widget has no paste action."""
+        from tg_cli.ui.paste import deliver_system_paste
+        deliver_system_paste(self)
 
     def action_toggle_qr_mode(self) -> None:
         if hasattr(self.screen, "action_toggle_qr_mode"):

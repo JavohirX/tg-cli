@@ -376,6 +376,12 @@ def test_emoji_graphemes_use_terminal_cells_not_rich_sum():
     assert cell_width("🙏🏻") == 4  # folded hands + skin tone, not fused
     assert cell_width("\U0001f3a4\ufe0e") == 3  # 🎤︎ microphone + VS15
     assert cell_width("⭐\ufe0f") == 3
+    assert cell_width("Startup La\u0337unch") == 15  # solidus overlay advances
+    assert cell_width("[̲̅J̲̅] [̲̅R̲̅]") == 15  # eight marks, each one cell
+    assert cell_width("🅼") == 2
+    assert cell_width("🅰️") == 3  # squared letter + VS16
+    assert cell_width("a\u200bb") == 3
+    assert cell_width("◡\u0308\u20dd") == 3  # base + diaeresis + enclosing circle
     assert cell_width("👤") == _ORIGINAL_CELL_LEN("👤") == 2
     assert cell_width("📢") == 2
     assert cell_width("👥") == 2
@@ -439,6 +445,43 @@ def test_render_chat_row_emojis_do_not_shift_columns():
         time_str = format_chat_time(now)
         time_idx = row.plain.find(time_str)
         assert cell_width(row.plain[:time_idx]) == 69, title
+
+
+def test_decorated_titles_keep_the_time_column():
+    """Overlines, squared letters, and a ZWSP must not push the clock."""
+    now = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+    titles = [
+        "Startup Launch",
+        "Startup La\u0337unch",
+        "[̲̅J̲̅] [̲̅R̲̅]",
+        "🔴🅼🅸🆂🆃🅴®_🅶 ㅤ◡̈⃝",
+        "СОЛНЫШКО☀️☁️",
+        "🅰️",
+    ]
+    previews = [
+        "hello",
+        "[photo] Aziz",
+        "Приятного аппетита",
+        "Напишите ей она будет показывать",
+        "[photo] \u200bУже завтра",
+        "Всё, спасибо",
+    ]
+    time_str = format_chat_time(now)
+    columns = []
+    for title, preview in zip(titles, previews):
+        chat = Chat(
+            account_id=1,
+            chat_id=10,
+            title=title,
+            kind=ChatKind.USER,
+            last_date=now,
+            last_preview=preview,
+        )
+        row = render_chat_row(chat, width=120)
+        assert cell_width(row.plain) == 120, title
+        time_idx = row.plain.find(time_str)
+        columns.append(cell_width(row.plain[:time_idx]))
+    assert columns == [columns[0]] * len(columns)
 
 
 def test_render_chat_row_selection_alignment():
@@ -590,6 +633,84 @@ def test_direct_message_hides_name_and_colors_by_author():
     assert hello_col == there_col
     assert _color_at(out_lines[0], "hello") == "#c4b48a"
     assert _color_at(in_lines[0], "hi back") == "#8eabc4"
+
+
+def _col(line: str, needle: str) -> int:
+    return cell_width(line[: line.index(needle)])
+
+
+def test_forwarded_text_starts_in_the_message_column():
+    """A forward keeps the clock on the left. Its lines start where other text starts."""
+    when = datetime(2026, 10, 5, 12, 4, tzinfo=timezone.utc)
+    normal = Message(
+        account_id=1,
+        chat_id=10,
+        message_id=1,
+        date=when,
+        plain_text="hello\nthere",
+        outgoing=True,
+    )
+    forwarded = Message(
+        account_id=1,
+        chat_id=10,
+        message_id=2,
+        date=when,
+        plain_text="hello\nthere",
+        forward_label="Ada",
+        outgoing=True,
+    )
+    normal_lines = render_message(normal, width=80, direct=True, show_sender=False)
+    fwd_lines = render_message(forwarded, width=80, direct=True, show_sender=False)
+    hello_col = _col(normal_lines[0].plain, "hello")
+    clock = format_time(when)
+    clock_col = _col(fwd_lines[0].plain, clock)
+    assert clock_col < hello_col
+    assert _col(next(line.plain for line in fwd_lines if "fwd from Ada" in line.plain), "fwd") == hello_col
+    assert _col(next(line.plain for line in fwd_lines if "hello" in line.plain), "hello") == hello_col
+    assert _col(next(line.plain for line in fwd_lines if line.plain.strip() == "there"), "there") == hello_col
+
+    # Same author, next minute hidden: the forward still uses that column.
+    cont = render_message(forwarded, width=80, direct=True, show_sender=False, show_time=False)
+    assert clock not in cont[0].plain
+    assert _col(cont[0].plain, "fwd") == hello_col
+    assert _col(next(line.plain for line in cont if "hello" in line.plain), "hello") == hello_col
+
+    # Groups keep the forward under the name, with the body.
+    group = render_message(forwarded, width=80, direct=False, show_sender=True)
+    assert next(line.plain for line in group if "fwd from Ada" in line.plain) == "      fwd from Ada"
+    assert next(line.plain for line in group if "hello" in line.plain) == "      hello"
+
+
+def test_direct_reply_starts_in_the_message_column():
+    when = datetime(2026, 10, 5, 12, 4, tzinfo=timezone.utc)
+    original = Message(
+        account_id=1,
+        chat_id=10,
+        message_id=1,
+        sender_name="Ada",
+        plain_text="earlier",
+    )
+    reply = Message(
+        account_id=1,
+        chat_id=10,
+        message_id=2,
+        date=when,
+        plain_text="hello",
+        reply_id=1,
+        outgoing=True,
+    )
+    normal = render_message(
+        Message(account_id=1, chat_id=10, message_id=3, date=when, plain_text="hello", outgoing=True),
+        width=80,
+        direct=True,
+        show_sender=False,
+    )
+    lines = render_message(reply, width=80, direct=True, show_sender=False, replied_message=original)
+    hello_col = _col(normal[0].plain, "hello")
+    quote = next(line.plain for line in lines if "Ada" in line.plain)
+    body = next(line.plain for line in lines if line.plain.strip() == "hello")
+    assert _col(quote, ">") == hello_col
+    assert _col(body, "hello") == hello_col
 
 
 def test_group_name_shown_once_and_body_indented():

@@ -7,6 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Sequence
+from tg_cli.domain.files import build_outgoing_file_message
 from tg_cli.domain.models import (
     Account,
     AuthState,
@@ -68,6 +69,7 @@ class FakeGateway:
         self.messages: dict[tuple[int, int], list[Message]] = {}
         self.drafts: dict[tuple[int, int], Draft] = {}
         self.transcripts: dict[tuple[int, int, int], Transcript] = {}
+        self.sent_files: list[dict] = []
         self.sessions: dict[int, list[SessionInfo]] = {}
         self.profiles: dict[int, UserProfile] = {}
         self._listeners: list[Callable[[str, dict], None]] = []
@@ -504,6 +506,48 @@ class FakeGateway:
             chat.last_date = msg.date
             chat.last_preview = text
         return msg
+
+    def send_files(
+        self,
+        account_id: int,
+        chat_id: int,
+        paths: Sequence[str],
+        *,
+        as_file: bool,
+        caption: str = "",
+        reply_to_id: int | None = None,
+    ) -> list[Message]:
+        self.sent_files.append({
+            "account_id": account_id,
+            "chat_id": chat_id,
+            "paths": list(paths),
+            "as_file": as_file,
+            "caption": caption,
+            "reply_to_id": reply_to_id,
+        })
+        msgs = self.messages.setdefault((account_id, chat_id), [])
+        created: list[Message] = []
+        for index, path in enumerate(paths):
+            new_id = (msgs[-1].message_id + 1) if msgs else 1
+            msg = build_outgoing_file_message(
+                account_id=account_id,
+                chat_id=chat_id,
+                message_id=new_id,
+                path=path,
+                as_file=as_file,
+                caption=caption if index == 0 else "",
+                reply_to_id=reply_to_id if index == 0 else None,
+                send_state=SendState.SENT,
+            )
+            msgs.append(msg)
+            created.append(msg)
+        if created and chat_id in self.chats.get(account_id, {}):
+            chat = self.chats[account_id][chat_id]
+            last = created[-1]
+            chat.last_message_id = last.message_id
+            chat.last_date = last.date
+            chat.last_preview = last.plain_text or last.caption or f"[{last.kind.value}]"
+        return created
 
     def edit_message(
         self,

@@ -19,6 +19,20 @@ from textual.widgets import Static, TextArea
 class ComposerInput(TextArea):
     """Subclass of TextArea to give Composer strict control over keys."""
 
+    BINDINGS = [
+        Binding("shift+insert,ctrl+shift+v", "paste", "Paste", show=False),
+    ]
+
+    def action_paste(self) -> None:
+        from tg_cli.ui.paste import deliver_system_paste
+        deliver_system_paste(self.app)
+
+    def _on_paste(self, event: Paste) -> None:
+        event.prevent_default()
+        event.stop()
+        from tg_cli.ui.paste import deliver_system_paste
+        deliver_system_paste(self.app, explicit_text=event.text)
+
     def check_consume_key(self, key: str, character: str | None = None) -> bool:
         """Leave z/Z for message expand unless the user is actually typing."""
         if key in ("z", "Z"):

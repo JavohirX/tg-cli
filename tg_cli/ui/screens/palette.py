@@ -11,6 +11,7 @@ from textual.containers import Container, Vertical
 from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList
+from tg_cli.ui.paste import PasteInput
 from textual.widgets.option_list import Option
 from tg_cli.commands import Command, get_commands_for_context
 
@@ -56,7 +57,7 @@ class CommandPalette(ModalScreen[Command | None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="palette-container"):
-            yield Input(placeholder="Type a command...", id="palette-input")
+            yield PasteInput(placeholder="Type a command...", id="palette-input")
             yield OptionList(id="palette-options")
 
     def on_mount(self) -> None:

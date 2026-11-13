@@ -1,13 +1,24 @@
-"""Copy text onto the terminal clipboard and the Windows clipboard.
+"""Copy and read the terminal clipboard and the Windows clipboard.
 
 Textual writes OSC 52, which a terminal may ignore. On Windows the Win32
-clipboard is what Ctrl+C in other programs reads.
+clipboard is what Ctrl+C and Ctrl+V in other programs use. Textual's own
+clipboard only remembers text copied inside this process, so a paste has
+to read CF_UNICODETEXT and CF_HDROP itself.
 """
 
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ClipboardPayload:
+    """Text and file paths currently on the system clipboard."""
+
+    text: str = ""
+    files: tuple[str, ...] = ()
 
 
 def copy_text(app: Any, text: str) -> bool:
@@ -23,6 +34,68 @@ def copy_text(app: Any, text: str) -> bool:
     if sys.platform == "win32" and _win32_set(text):
         ok = True
     return ok
+
+
+def read_clipboard() -> ClipboardPayload:
+    """Read text and file paths from the system clipboard."""
+    if sys.platform == "win32":
+        return _win32_read()
+    return ClipboardPayload()
+
+
+def _win32_read() -> ClipboardPayload:
+    """Read CF_HDROP paths and CF_UNICODETEXT. Never frees clipboard memory."""
+    import ctypes
+
+    CF_UNICODETEXT = 13
+    CF_HDROP = 15
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    shell32 = ctypes.windll.shell32
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.OpenClipboard.restype = ctypes.c_int
+    user32.CloseClipboard.argtypes = []
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    shell32.DragQueryFileW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_wchar_p,
+        ctypes.c_uint,
+    ]
+    shell32.DragQueryFileW.restype = ctypes.c_uint
+
+    if not user32.OpenClipboard(None):
+        return ClipboardPayload()
+    try:
+        files: list[str] = []
+        hdrop = user32.GetClipboardData(CF_HDROP)
+        if hdrop:
+            count = shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+            for index in range(count):
+                length = shell32.DragQueryFileW(hdrop, index, None, 0)
+                buf = ctypes.create_unicode_buffer(length + 1)
+                shell32.DragQueryFileW(hdrop, index, buf, length + 1)
+                if buf.value:
+                    files.append(buf.value)
+
+        text = ""
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if handle:
+            locked = kernel32.GlobalLock(handle)
+            if locked:
+                try:
+                    text = ctypes.wstring_at(locked)
+                finally:
+                    kernel32.GlobalUnlock(handle)
+        return ClipboardPayload(text=text, files=tuple(files))
+    except Exception:
+        return ClipboardPayload()
+    finally:
+        user32.CloseClipboard()
 
 
 def _win32_set(text: str) -> bool:

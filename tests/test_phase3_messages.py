@@ -54,6 +54,32 @@ class MessagePagingGateway(FakeGateway):
             listener(event_type, data)
 
 
+class DeferredHistoryGateway(MessagePagingGateway):
+    """Older rows exist, but stay hidden while a history fetch is in flight."""
+
+    def __init__(self):
+        super().__init__()
+        self.fetch_pending = False
+        self.hide_older = False
+
+    def get_messages(
+        self,
+        account_id,
+        chat_id,
+        limit=50,
+        before_id=None,
+        search_query="",
+    ):
+        if before_id is not None and self.hide_older:
+            return []
+        return super().get_messages(
+            account_id, chat_id, limit, before_id, search_query
+        )
+
+    def message_fetch_in_flight(self, account_id, chat_id, before_id=None):
+        return bool(self.fetch_pending and before_id is not None)
+
+
 def _plain_lines(renderable) -> list[str]:
     buf = io.StringIO()
     console = Console(file=buf, width=80, force_terminal=False)
@@ -401,6 +427,131 @@ async def test_messages_history_paging_up():
         # Cursor should stay on the exact same message without jumping!
         focused_after = screen.message_list.get_focused_item()
         assert focused_after.message_id == focused_before.message_id
+
+
+@pytest.mark.asyncio
+async def test_empty_local_page_waits_for_history_fetch():
+    """A cache miss is not the beginning while Telegram still owes a page."""
+    gw = DeferredHistoryGateway()
+    gw.hide_older = True
+    gw.fetch_pending = True
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chats(alice.user_id)[0]
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        assert len(screen._all_messages) == 50
+        focused_before = None
+
+        await pilot.press("home")
+        await pilot.pause()
+        focused_before = screen.message_list.get_focused_item()
+        await pilot.press("k")
+        await pilot.pause()
+
+        assert screen._pending_before_id == screen._all_messages[0].message_id
+        assert len(screen._all_messages) == 50
+        assert screen._unseen_count == 0
+        assert screen.status_bar.status_message == "Loading older history..."
+        assert "Beginning of history" not in screen.status_bar.status_message
+
+        before_id = screen._pending_before_id
+        gw.hide_older = False
+        gw.fetch_pending = False
+        gw.emit_event("messages_changed", {
+            "chat_id": chat.chat_id,
+            "before_id": before_id,
+            "count": 50,
+        })
+        await pilot.pause()
+
+        assert len(screen._all_messages) == 100
+        assert screen._all_messages[0].message_id < before_id
+        focused_after = screen.message_list.get_focused_item()
+        assert focused_after.message_id == focused_before.message_id
+        assert screen._unseen_count == 0
+        assert screen.status_bar.status_message == "Loaded 50 older messages."
+
+        gw.emit_event("fetch_messages_done", {
+            "chat_id": chat.chat_id,
+            "before_id": before_id,
+            "count": 50,
+            "exhausted": False,
+        })
+        await pilot.pause()
+        assert screen.status_bar.status_message == "Loaded 50 older messages."
+        assert "Beginning of history" not in screen.status_bar.status_message
+
+
+@pytest.mark.asyncio
+async def test_history_fetch_empty_page_is_the_beginning():
+    gw = DeferredHistoryGateway()
+    gw.hide_older = True
+    gw.fetch_pending = True
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chats(alice.user_id)[0]
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("home")
+        await pilot.pause()
+        await pilot.press("k")
+        await pilot.pause()
+        assert screen.status_bar.status_message == "Loading older history..."
+
+        before_id = screen._pending_before_id
+        gw.fetch_pending = False
+        gw.emit_event("fetch_messages_done", {
+            "chat_id": chat.chat_id,
+            "before_id": before_id,
+            "count": 0,
+            "exhausted": True,
+        })
+        await pilot.pause()
+
+        assert len(screen._all_messages) == 50
+        assert screen._pending_before_id is None
+        assert screen.status_bar.status_message == "Beginning of history reached."
+
+
+@pytest.mark.asyncio
+async def test_history_fetch_error_is_not_the_beginning():
+    gw = DeferredHistoryGateway()
+    gw.hide_older = True
+    gw.fetch_pending = True
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chats(alice.user_id)[0]
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        await pilot.press("home")
+        await pilot.pause()
+        await pilot.press("k")
+        await pilot.pause()
+
+        before_id = screen._pending_before_id
+        gw.fetch_pending = False
+        gw.emit_event("fetch_messages_done", {
+            "chat_id": chat.chat_id,
+            "before_id": before_id,
+            "count": 0,
+            "exhausted": False,
+            "error": "Rate limited: wait 3s",
+        })
+        await pilot.pause()
+
+        assert len(screen._all_messages) == 50
+        assert screen.status_bar.status_message == "Rate limited: wait 3s"
+        assert "Beginning of history" not in screen.status_bar.status_message
 
 
 @pytest.mark.asyncio

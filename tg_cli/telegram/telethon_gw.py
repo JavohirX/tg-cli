@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 from tg_cli.config import load_config
+from tg_cli.domain.files import build_outgoing_file_message
 from tg_cli.domain.models import (
     Account,
     AuthState,
@@ -28,6 +29,7 @@ from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
     archive_chats as repo_archive_chats,
+    cancel_chat_deletes,
     clear_draft as repo_clear_draft,
     delete_chats as repo_delete_chats,
     delete_messages as repo_delete_messages,
@@ -43,6 +45,7 @@ from tg_cli.store.repo import (
     mark_chats_read as repo_mark_chats_read,
     mute_chats as repo_mute_chats,
     save_draft as repo_save_draft,
+    schedule_chat_deletes,
     upsert_account as repo_upsert_account,
     upsert_chats as repo_upsert_chats,
     upsert_messages as repo_upsert_messages,
@@ -51,6 +54,7 @@ from tg_cli.store.repo import (
 import time
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.telegram.worker import (
+    ArchiveChatsCmd,
     CancelLoginCmd,
     CancelQrLoginCmd,
     ConnectAccountsCmd,
@@ -62,8 +66,11 @@ from tg_cli.telegram.worker import (
     GetProfileCmd,
     GetSessionsCmd,
     MarkChatReadCmd,
+    MuteChatsCmd,
     RevokeSessionCmd,
+    SendFilesCmd,
     SendMessageCmd,
+    ResendLoginCodeCmd,
     StartLoginCmd,
     StartQrLoginCmd,
     StopWorkerCmd,
@@ -115,7 +122,10 @@ class TelethonGateway:
             key = (user_id, chat_id, before_id)
             with self._lock:
                 self._in_flight_fetches.discard(key)
-                self._last_fetch_time[key] = time.time()
+                # A failed page must stay retryable. A successful empty page
+                # still counts, so the beginning is not requested in a loop.
+                if not data.get("error"):
+                    self._last_fetch_time[key] = time.time()
         elif event_type == "roles_changed" and not data.get("error"):
             user_id = data.get("user_id")
             chat_id = data.get("chat_id")
@@ -238,6 +248,17 @@ class TelethonGateway:
                     pass
         self.worker.submit_command(FetchRolesCmd(account_id=account_id, chat_id=chat_id))
 
+    def message_fetch_in_flight(
+        self,
+        account_id: int,
+        chat_id: int,
+        before_id: int | None = None,
+    ) -> bool:
+        """True while a history page for this offset is still on the worker."""
+        key = (account_id, chat_id, before_id)
+        with self._lock:
+            return key in self._in_flight_fetches
+
     def fetch_messages(
         self,
         account_id: int,
@@ -303,6 +324,50 @@ class TelethonGateway:
         )
         return msg
 
+    def send_files(
+        self,
+        account_id: int,
+        chat_id: int,
+        paths: Sequence[str],
+        *,
+        as_file: bool,
+        caption: str = "",
+        reply_to_id: int | None = None,
+    ) -> list[Message]:
+        created: list[Message] = []
+        temp_ids: list[int] = []
+        with self._lock:
+            for _path in paths:
+                temp_ids.append(self._temp_msg_counter)
+                self._temp_msg_counter -= 1
+        for index, (temp_id, path) in enumerate(zip(temp_ids, paths)):
+            created.append(
+                build_outgoing_file_message(
+                    account_id=account_id,
+                    chat_id=chat_id,
+                    message_id=temp_id,
+                    path=str(path),
+                    as_file=as_file,
+                    caption=caption if index == 0 else "",
+                    reply_to_id=reply_to_id if index == 0 else None,
+                    send_state=SendState.QUEUED,
+                )
+            )
+        if created:
+            repo_upsert_messages(self.conn, created)
+            self.worker.submit_command(
+                SendFilesCmd(
+                    account_id=account_id,
+                    chat_id=chat_id,
+                    temp_ids=temp_ids,
+                    paths=[str(path) for path in paths],
+                    as_file=as_file,
+                    caption=caption,
+                    reply_to_id=reply_to_id,
+                )
+            )
+        return created
+
     def edit_message(
         self,
         account_id: int,
@@ -357,6 +422,14 @@ class TelethonGateway:
         archived: bool = True,
     ) -> None:
         repo_archive_chats(self.conn, account_id, chat_ids, archived)
+        if chat_ids:
+            self.worker.submit_command(
+                ArchiveChatsCmd(
+                    account_id=account_id,
+                    chat_ids=chat_ids,
+                    archived=archived,
+                )
+            )
 
     def mute_chats(
         self,
@@ -365,6 +438,14 @@ class TelethonGateway:
         muted: bool = True,
     ) -> None:
         repo_mute_chats(self.conn, account_id, chat_ids, muted)
+        if chat_ids:
+            self.worker.submit_command(
+                MuteChatsCmd(
+                    account_id=account_id,
+                    chat_ids=chat_ids,
+                    muted=muted,
+                )
+            )
 
     def mark_chats_read(
         self,
@@ -387,6 +468,7 @@ class TelethonGateway:
         chat_ids: Sequence[int],
     ) -> None:
         repo_delete_chats(self.conn, account_id, chat_ids)
+        schedule_chat_deletes(self.conn, account_id, chat_ids)
 
     def restore_chats(
         self,
@@ -394,6 +476,7 @@ class TelethonGateway:
         chats: Sequence[Chat],
     ) -> None:
         repo_upsert_chats(self.conn, chats)
+        cancel_chat_deletes(self.conn, account_id, [c.chat_id for c in chats])
 
     # Login management methods
     def start_login(self, phone: str, api_id: int, api_hash: str) -> None:
@@ -403,6 +486,9 @@ class TelethonGateway:
 
     def submit_login_code(self, code: str) -> None:
         self.worker.submit_command(SubmitCodeCmd(code=code))
+
+    def resend_login_code(self) -> None:
+        self.worker.submit_command(ResendLoginCodeCmd())
 
     def submit_login_password(self, password: str) -> None:
         self.worker.submit_command(SubmitPasswordCmd(password=password))
@@ -430,11 +516,46 @@ class TelethonGateway:
     def clear_draft(self, account_id: int, chat_id: int) -> None:
         repo_clear_draft(self.conn, account_id, chat_id)
 
-    def retry_failed_message(self, account_id: int, chat_id: int, message_id: int) -> None:
+    def retry_failed_message(self, account_id: int, chat_id: int, message_id: int) -> bool:
+        """Queue the failed row again. Return False when there is nothing to send."""
+        msg = repo_get_message(self.conn, account_id, chat_id, message_id)
+        if msg is None or msg.send_state != SendState.FAILED:
+            return False
+        if msg.local_path:
+            if not Path(msg.local_path).is_file():
+                return False
+            self._mark_queued(account_id, chat_id, message_id)
+            self.worker.submit_command(
+                SendFilesCmd(
+                    account_id=account_id,
+                    chat_id=chat_id,
+                    temp_ids=[message_id],
+                    paths=[msg.local_path],
+                    as_file=msg.kind == MessageKind.FILE,
+                    caption=msg.caption,
+                    reply_to_id=msg.reply_id,
+                )
+            )
+            return True
+        if msg.kind == MessageKind.TEXT and msg.plain_text:
+            self._mark_queued(account_id, chat_id, message_id)
+            self.worker.submit_command(
+                SendMessageCmd(
+                    account_id=account_id,
+                    chat_id=chat_id,
+                    temp_msg_id=message_id,
+                    text=msg.plain_text,
+                    reply_to_id=msg.reply_id,
+                )
+            )
+            return True
+        return False
+
+    def _mark_queued(self, account_id: int, chat_id: int, message_id: int) -> None:
         with self.conn:
             self.conn.execute(
                 "UPDATE messages SET send_state = ? WHERE account_id = ? AND chat_id = ? AND message_id = ?",
-                (SendState.SENT.value, account_id, chat_id, message_id),
+                (SendState.QUEUED.value, account_id, chat_id, message_id),
             )
 
     def get_transcript(self, account_id: int, chat_id: int, message_id: int) -> Transcript | None:

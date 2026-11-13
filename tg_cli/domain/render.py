@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import os
 import sys
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Sequence
 import unicodedata
 from rich.cells import cached_cell_len as _ORIGINAL_CACHED_CELL_LEN
@@ -137,26 +139,39 @@ def is_emoji_cluster(cluster: str) -> bool:
     return False
 
 
+def _parse_emoji_width(override: str | None) -> int:
+    if not override:
+        return 2
+    try:
+        return max(1, min(2, int(override.strip())))
+    except ValueError:
+        return 2
+
+
+# Read again in get_emoji_cell_width. The hot path uses this global so a
+# frame does not query the process environment for every character.
+_EMOJI_WIDTH = _parse_emoji_width(os.environ.get("TG_CLI_EMOJI_WIDTH"))
+
+
 def get_emoji_cell_width(cluster: str = "") -> int:
     """Return cell width for one emoji grapheme on Windows Terminal (default 2)."""
-    override = os.environ.get("TG_CLI_EMOJI_WIDTH")
-    if override:
-        try:
-            return max(1, min(2, int(override.strip())))
-        except ValueError:
-            pass
-    return 2
+    global _EMOJI_WIDTH
+    _EMOJI_WIDTH = _parse_emoji_width(os.environ.get("TG_CLI_EMOJI_WIDTH"))
+    return _EMOJI_WIDTH
 
 
 def _needs_emoji_measure(text: str) -> bool:
-    """True when Rich's per-codepoint sum can disagree with Windows Terminal."""
+    """True when Rich's per-codepoint sum can disagree with this console."""
     for ch in text:
         code = ord(ch)
         if (
             code == 0x200D  # ZWJ
+            or code == 0x200B  # ZWSP still advances a cell
             or code == 0xFE0F  # VS16
+            or code == 0xFE0E  # VS15
             or code == 0x20E3  # keycap
             or code >= 0x1F000  # SMP emoji / flags / skin tones
+            or unicodedata.category(ch).startswith("M")
         ):
             return True
     return False
@@ -171,22 +186,39 @@ def _is_bmp_emoji_presentation(code: int) -> bool:
     return False
 
 
-def _base_char_width(ch: str) -> int:
+# VS16, VS15, and ZWJ each advance one cell. They are not part of the base.
+_SELECTOR_OR_JOINER = frozenset({0xFE0F, 0xFE0E, 0x200D})
+
+
+@lru_cache(maxsize=4096)
+def _cached_base_char_width(ch: str, emoji_width: int) -> int:
     """Width of one base character. Joiners and selectors are counted separately."""
     cp = ord(ch)
-    # Enclosing keycap and combining marks fuse. Skin tones do not: they are
-    # wide (EAW=W) and this console leaves them as their own cell.
-    if cp == 0x20E3 or unicodedata.category(ch).startswith("M"):
+    # The keycap enclosing mark fuses. Other marks do not: overline, low
+    # line, the solidus in "La̷unch", and the circle in a decorated name
+    # each advance a cell.
+    if cp == 0x20E3:
         return 0
+    if unicodedata.category(ch).startswith("M"):
+        return 1
+    # This console advances a cell for U+200B. Rich counts it as zero.
+    if cp == 0x200B:
+        return 1
     # Regional indicators are EAW=N but are drawn as two wide letters.
-    if 0x1F1E6 <= cp <= 0x1F1FF:
-        return get_emoji_cell_width()
+    # Negative squared A–Z are EAW=A and are also two cells, so 🅰️
+    # (letter + VS16) is 3.
+    if 0x1F1E6 <= cp <= 0x1F1FF or 0x1F170 <= cp <= 0x1F189:
+        return emoji_width
     # Wide and fullwidth characters, including skin tones and emoji
     # pictographs. Neutral SMP symbols (🏛 U+1F3DB, 🖼 U+1F5BC) stay narrow
     # unless a variation selector adds a cell.
     if _is_bmp_emoji_presentation(cp) or unicodedata.east_asian_width(ch) in ("W", "F"):
-        return get_emoji_cell_width()
+        return emoji_width
     return _ORIGINAL_CELL_LEN(ch)
+
+
+def _base_char_width(ch: str) -> int:
+    return _cached_base_char_width(ch, get_emoji_cell_width())
 
 
 def cluster_terminal_width(cluster: str) -> int:
@@ -204,10 +236,10 @@ def cluster_terminal_width(cluster: str) -> int:
       as VS16, so the Shazam title is 3.
     - Flags stay two wide letters (4). VS16 on an already-wide mark is
       +1 (❗ is 3). ZWJ is +1 and does not fuse.
+    - Combining marks other than the keycap advance a cell. U+200B does too.
+    - Negative squared letters are 2, so 🅰️ (letter + VS16) is 3.
     """
     if not cluster:
-        return 0
-    if _ORIGINAL_CELL_LEN(cluster) <= 0 and not any(unicodedata.east_asian_width(ch) in ("W", "F") for ch in cluster):
         return 0
     total = 0
     for ch in cluster:
@@ -220,13 +252,34 @@ def cluster_terminal_width(cluster: str) -> int:
     return total
 
 
+@lru_cache(maxsize=16384)
+def _cached_terminal_cell_width(text: str, emoji_width: int) -> int:
+    """Width of one string. A miss walks the code points once.
+
+    Grapheme boundaries are not needed here. On this console a joiner, a
+    variation selector, and a combining mark each occupy their own cell, so
+    the string width is the sum of the character widths. Truncation still
+    splits graphemes so a flag is not cut in half.
+    """
+    if not _needs_emoji_measure(text):
+        return _ORIGINAL_CELL_LEN(text)
+    total = 0
+    for ch in text:
+        if ord(ch) in _SELECTOR_OR_JOINER:
+            total += 1
+            continue
+        total += _cached_base_char_width(ch, emoji_width)
+    return total
+
+
 def terminal_cell_width(text: str) -> int:
     """Display width of text using Windows Terminal grapheme widths."""
     if not text:
         return 0
-    if text.isascii() or not _needs_emoji_measure(text):
-        return _ORIGINAL_CELL_LEN(text)
-    return sum(cluster_terminal_width(cluster) for cluster in split_graphemes(text))
+    # Padding and ASCII previews never need the emoji table.
+    if text.isascii():
+        return len(text)
+    return _cached_terminal_cell_width(text, _EMOJI_WIDTH)
 
 
 def grapheme_cell_width(cluster: str) -> int:
@@ -422,6 +475,20 @@ def get_kind_glyph(kind: ChatKind) -> str:
             return ""
 
 
+# A scroll rebuilds the rows that enter the window. Rows already built for
+# this width, cursor, and selection are reused. The Text is shared, so
+# callers must not mutate it.
+_CHAT_ROW_CACHE: OrderedDict[tuple, Text] = OrderedDict()
+_CHAT_ROW_CACHE_MAX = 8192
+
+
+def _remember_chat_row(key: tuple, line: Text) -> Text:
+    _CHAT_ROW_CACHE[key] = line
+    if len(_CHAT_ROW_CACHE) > _CHAT_ROW_CACHE_MAX:
+        _CHAT_ROW_CACHE.popitem(last=False)
+    return line
+
+
 def render_chat_row(
     chat: Chat,
     width: int,
@@ -431,6 +498,32 @@ def render_chat_row(
     has_selection: bool = False,
 ) -> Text:
     """Render a single chat row fitting strictly within width cells."""
+    # The stamp is part of the key, so a row built yesterday is not reused
+    # after the clock changes. Emoji width is part of it too: the tests
+    # switch TG_CLI_EMOJI_WIDTH and the columns must follow.
+    stamp = "" if is_archive_header else (format_chat_time(chat.last_date) or "")
+    key = (
+        get_emoji_cell_width(),
+        chat.account_id,
+        chat.chat_id,
+        chat.title,
+        chat.kind,
+        chat.unread_count,
+        chat.muted,
+        chat.pinned,
+        chat.last_preview,
+        stamp,
+        width,
+        is_cursor,
+        is_selected,
+        is_archive_header,
+        has_selection,
+    )
+    cached = _CHAT_ROW_CACHE.get(key)
+    if cached is not None:
+        _CHAT_ROW_CACHE.move_to_end(key)
+        return cached
+
     line = Text()
 
     # Cursor / selection prefix
@@ -443,7 +536,7 @@ def render_chat_row(
     if is_archive_header:
         line.append(prefix, style="bold cyan" if is_cursor else "default")
         line.append("[Archive]", style="bold blue")
-        return line
+        return _remember_chat_row(key, line)
 
     glyph = get_kind_glyph(chat.kind)
     glyph_part = f"{glyph} " if glyph else "   "
@@ -562,7 +655,7 @@ def render_chat_row(
     line.append(" " * pad_needed)
 
     # 4. Stamp column (strictly time_width cells): HH:MM, dd/mm, or the year.
-    time_str = format_chat_time(chat.last_date) or ""
+    time_str = stamp
     time_clean = time_str[:time_width]
     pad_time = max(0, time_width - cell_width(time_clean))
     line.append((" " * pad_time) + time_clean, style="dim")
@@ -594,7 +687,7 @@ def render_chat_row(
     elif is_selected:
         line.stylize("on grey19")
 
-    return line
+    return _remember_chat_row(key, line)
 
 
 def get_message_summary(message: Message) -> str:
@@ -635,9 +728,9 @@ _GROUP_NAME_COLORS = (
     "#a3b18a",
     "#d4b483",
     "#c48b8b",
-    "#b0a0c4",
+    "#8aa0a6",
     "#7eaea4",
-    "#c4a3b0",
+    "#c4b4a0",
     "#9aab84",
 )
 COLLAPSED_BODY_LINES = 12
@@ -912,20 +1005,12 @@ def render_message(
 
     # Direct chats put the first line of a new bundle on the time row.
     # Later messages in the bundle line up under that text, and the cursor
-    # mark stays in the left margin.
+    # mark stays in the left margin. A forward, reply, or deleted row keeps
+    # its own line, but that line still starts in the message column, to the
+    # right of the clock, not under the clock itself.
     normal_col = cell_width(f"  {clock}  ") if clock else cell_width("    ")
     direct_pad = max(0, normal_col - cell_width(header_prefix))
-    body_col = cell_width(body_indent)
-    will_attach = (
-        header_visible
-        and direct
-        and show_time
-        and not message.reply_id
-        and not message.forward_label
-        and not message.is_deleted
-        and bool(body_text.strip())
-    )
-    if will_attach:
+    if direct and header_visible:
         text_col = cell_width(header.plain) + cell_width("  ")
     elif not header_visible:
         extra = direct_pad if direct else cell_width(GROUP_BODY_PAD)
@@ -948,14 +1033,15 @@ def render_message(
     )
     if attach_first:
         header.append("  ")
-        body_col = cell_width(header.plain)
-        avail = max(1, width - body_col - 1)
+        avail = max(1, width - cell_width(header.plain) - 1)
         header.append(truncate_to_width(shown[0], avail), style=color)
     if header_visible:
         lines.append(header)
 
     started_content = header_visible
-    wrap_indent = " " * body_col if (direct and attach_first) else body_indent
+    # Direct content shares one column: the gap after the clock. Group
+    # content keeps the indent under the sender name.
+    wrap_indent = (" " * text_col) if (direct and header_visible) else body_indent
 
     def begin_line() -> Text:
         """Indent one content line. The first line of a continuation keeps the cursor."""
@@ -979,7 +1065,8 @@ def render_message(
             if not sender_name:
                 sender_name = "You" if replied_message.outgoing else "Unknown"
             reply_body = collapse_newlines(get_message_summary(replied_message))
-            quote_chrome = cell_width(body_indent) + cell_width("> ") + cell_width(f"{sender_name}: ")
+            quote_pad = cell_width(wrap_indent) if header_visible else text_col
+            quote_chrome = quote_pad + cell_width("> ") + cell_width(f"{sender_name}: ")
             quote_limit = min(MESSAGE_LINE_MAX, max(1, width - quote_chrome - 1))
             reply_lines = _wrap_block(reply_body, quote_limit)
             max_reply_lines = 1000 if expanded else 2
@@ -1006,9 +1093,13 @@ def render_message(
             lines.append(reply_line)
 
     if message.forward_label:
-        fwd_line = begin_line()
-        fwd_line.append(f"fwd from {message.forward_label}", style="dim italic")
-        lines.append(fwd_line)
+        label = f"fwd from {message.forward_label}"
+        fwd_limit = min(MESSAGE_LINE_MAX, max(1, width - text_col - 1))
+        for part in wrap_words(label, fwd_limit):
+            fwd_line = begin_line()
+            avail = max(1, width - cell_width(fwd_line.plain) - 1)
+            fwd_line.append(truncate_to_width(part, avail), style="dim italic")
+            lines.append(fwd_line)
 
     if message.is_deleted:
         del_line = begin_line()

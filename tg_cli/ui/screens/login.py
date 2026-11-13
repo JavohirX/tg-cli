@@ -14,6 +14,7 @@ from textual.containers import Container, Vertical
 from textual.events import Key
 from textual.screen import ModalScreen
 from textual.widgets import Input, Static
+from tg_cli.ui.paste import PasteInput
 from tg_cli.config import has_api_credentials, load_config, save_config
 from tg_cli.ui.qr import generate_qr_ascii, render_progress_bar
 
@@ -90,13 +91,14 @@ class LoginScreen(ModalScreen[bool]):
     BINDINGS = [
         Binding("escape", "cancel_login", "Cancel", show=False),
         Binding("ctrl+q", "toggle_qr_mode", "Toggle QR", show=False),
+        Binding("ctrl+r", "resend_code", "Resend code", show=False, priority=True),
         Binding("p", "switch_to_phone", "Phone", show=False),
         Binding("P", "switch_to_phone", "Phone", show=False),
         Binding("r", "refresh_qr", "Refresh", show=False),
         Binding("R", "refresh_qr", "Refresh", show=False),
     ]
 
-    def __init__(self, gateway: Any, start_mode: str = "phone", **kwargs) -> None:
+    def __init__(self, gateway: Any, start_mode: str = "qr", **kwargs) -> None:
         super().__init__(**kwargs)
         self.gateway = gateway
         self.config = load_config()
@@ -110,6 +112,13 @@ class LoginScreen(ModalScreen[bool]):
         self.api_hash: str = self.config.get("api_hash") or ""
         self.phone: str = ""
         self.error_message: str = ""
+        self.code_hint: str = ""
+        self.code_delivered: bool = True
+        self._can_resend: bool = True
+        self._resend_in: int = 0
+        self._resend_timer = None
+        self._resend_pending: bool = False
+        self._pending_login_code: str = ""
 
         # QR state
         self.qr_url: str = ""
@@ -122,7 +131,7 @@ class LoginScreen(ModalScreen[bool]):
         self.qr_widget = Static("", id="login-qr")
         self.qr_widget.can_focus = True
         self.progress_widget = Static("", id="login-progress")
-        self.input_widget = Input(id="login-input")
+        self.input_widget = PasteInput(id="login-input")
         self.error_widget = Static("", id="login-error")
         self.status_widget = Static("Press Esc to cancel | Ctrl+Q for QR Login", id="login-status")
 
@@ -145,13 +154,22 @@ class LoginScreen(ModalScreen[bool]):
         if hasattr(self.gateway, "unregister_listener"):
             self.gateway.unregister_listener(self._on_gateway_event)
         self._stop_qr_timer()
+        self._stop_resend_timer()
 
     def _on_gateway_event(self, event_type: str, data: dict[str, Any]) -> None:
         def _dispatch() -> None:
             if event_type == "qr_login_token":
                 self.on_qr_token(data.get("url", ""), data.get("expires_in", 30))
+            elif event_type == "login_code_visible":
+                self.on_login_code_visible(str(data.get("code") or ""))
             elif event_type == "login_code_sent":
-                self.on_login_code_sent(data.get("phone", ""))
+                self.on_login_code_sent(
+                    data.get("phone", "") or self.phone,
+                    hint=str(data.get("hint") or ""),
+                    delivered=bool(data.get("delivered", True)),
+                    resend_in=_nonnegative_int(data.get("resend_in")),
+                    can_resend=bool(data.get("can_resend", True)),
+                )
             elif event_type == "login_2fa_needed":
                 self.on_login_2fa_needed(data.get("hint", ""))
             elif event_type == "login_error":
@@ -172,10 +190,39 @@ class LoginScreen(ModalScreen[bool]):
             self._qr_timer.stop()
             self._qr_timer = None
 
+    def _stop_resend_timer(self) -> None:
+        if self._resend_timer is not None:
+            self._resend_timer.stop()
+            self._resend_timer = None
+
+    def _refresh_code_status(self) -> None:
+        if not self._can_resend:
+            self.status_widget.update(
+                "No code will arrive on the phone | Ctrl+Q scan from that phone | Esc cancel"
+            )
+            return
+        if self._resend_in > 0:
+            extra = f"another method in {self._resend_in}s"
+        else:
+            extra = "Ctrl+R another method"
+        lead = "Enter the code" if self.code_delivered else "No code was sent yet"
+        self.status_widget.update(f"{lead} | {extra} | Ctrl+Q QR | Esc cancel")
+
+    def _tick_resend(self) -> None:
+        if self.step != "code":
+            self._stop_resend_timer()
+            return
+        if self._resend_in > 0:
+            self._resend_in -= 1
+        self._refresh_code_status()
+        if self._resend_in <= 0:
+            self._stop_resend_timer()
+
     def _update_step_ui(self) -> None:
         self.error_message = ""
         self.error_widget.update("")
         self.input_widget.value = ""
+        self._stop_resend_timer()
 
         if self.step == "credentials":
             self.qr_widget.display = False
@@ -211,8 +258,8 @@ class LoginScreen(ModalScreen[bool]):
             self.input_widget.display = True
             self.title_widget.update("Step 2: Phone Number")
             self.hint_widget.update(
-                "Enter international phone number (e.g. +12025550101)\n"
-                "Press Ctrl+Q to switch to QR Login mode"
+                "Enter the second account's international number (e.g. +12025550101).\n"
+                "The code goes to that number. Ctrl+Q adds whichever account scans the QR."
             )
             self.input_widget.placeholder = "+12025550101"
             self.input_widget.password = False
@@ -225,10 +272,16 @@ class LoginScreen(ModalScreen[bool]):
             self.progress_widget.display = False
             self.input_widget.display = True
             self.title_widget.update("Step 3: Verification Code")
-            self.hint_widget.update(f"Code sent to {self.phone} via Telegram/SMS:")
+            self.hint_widget.update(self.code_hint or (
+                "A phone code goes only to the number you typed.\n"
+                "Another account that is already open will not show it.\n"
+                "Ctrl+R asks for SMS or a call. Ctrl+Q is QR login."
+            ))
             self.input_widget.placeholder = "12345"
             self.input_widget.password = False
-            self.status_widget.update("Enter verification code | Esc to cancel")
+            self._refresh_code_status()
+            if self._resend_in > 0:
+                self._resend_timer = self.set_interval(1.0, self._tick_resend)
             self.input_widget.focus()
 
         elif self.step == "password":
@@ -307,6 +360,12 @@ class LoginScreen(ModalScreen[bool]):
             event.stop()
             return
 
+        if event.key == "ctrl+r":
+            self.action_resend_code()
+            event.prevent_default()
+            event.stop()
+            return
+
         if self.step == "qr":
             key_char = (event.character or event.key or "").lower()
             if key_char == "p":
@@ -336,7 +395,7 @@ class LoginScreen(ModalScreen[bool]):
                 return
 
             save_config(self.api_id, self.api_hash)
-            self.step = "phone"
+            self.step = "qr"
             self._update_step_ui()
 
         elif self.step == "phone":
@@ -369,10 +428,60 @@ class LoginScreen(ModalScreen[bool]):
             else:
                 self.on_login_success()
 
-    def on_login_code_sent(self, phone: str) -> None:
+    def action_resend_code(self) -> None:
+        if self.step != "code":
+            return
+        if self._resend_pending:
+            return
+        if not self._can_resend:
+            self.error_widget.update(
+                "[!] Telegram has no other way to send this code. "
+                "Ctrl+Q, then scan from the phone logged into this number."
+            )
+            return
+        if self._resend_in > 0:
+            self.error_widget.update(
+                f"[!] Telegram will not send another code for {self._resend_in}s"
+            )
+            return
+        self.error_widget.update("")
+        self.status_widget.update("Asking Telegram for another delivery method...")
+        if hasattr(self.gateway, "resend_login_code"):
+            self._resend_pending = True
+            self.gateway.resend_login_code()
+        else:
+            self.error_widget.update("[!] Resend is not available.")
+
+    def on_login_code_sent(
+        self,
+        phone: str,
+        hint: str = "",
+        delivered: bool = True,
+        resend_in: int = 0,
+        can_resend: bool = True,
+    ) -> None:
+        self._resend_pending = False
+        if phone:
+            self.phone = phone
+        self.code_hint = hint
+        self.code_delivered = delivered
+        self._can_resend = bool(can_resend)
+        self._resend_in = max(0, int(resend_in or 0))
         self.step = "code"
         self._update_step_ui()
-        self.status_widget.update("Code received? Enter it above.")
+        self._apply_pending_login_code()
+
+    def on_login_code_visible(self, code: str) -> None:
+        if not code:
+            return
+        self._pending_login_code = code
+        self._apply_pending_login_code()
+
+    def _apply_pending_login_code(self) -> None:
+        if self.step != "code" or not self._pending_login_code:
+            return
+        self.input_widget.value = self._pending_login_code
+        self.status_widget.update("Code arrived in the signed-in account. Press Enter.")
 
     def on_login_2fa_needed(self, hint: str) -> None:
         self.step = "password"
@@ -381,6 +490,7 @@ class LoginScreen(ModalScreen[bool]):
             self.hint_widget.update(f"2FA Active: {hint}")
 
     def on_login_error(self, error: str) -> None:
+        self._resend_pending = False
         self.error_message = error
         self.error_widget.update(f"[!] {error}")
         self.status_widget.update("Please check and try again.")
@@ -398,3 +508,10 @@ class LoginScreen(ModalScreen[bool]):
         elif hasattr(self.gateway, "cancel_login"):
             self.gateway.cancel_login()
         self.dismiss(False)
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0

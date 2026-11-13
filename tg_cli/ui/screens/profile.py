@@ -14,6 +14,7 @@ from textual.containers import Container, Vertical
 from textual.events import Key
 from textual.screen import Screen
 from textual.widgets import Input, Static
+from tg_cli.ui.paste import PasteInput
 from tg_cli.domain.models import Account, UserProfile
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import FooterBar, StatusBar
@@ -82,7 +83,7 @@ class ProfileScreen(Screen):
         self.details_widget = Static("", id="profile-details")
         self.details_widget.can_focus = True
         self.edit_label = Static("", id="profile-edit-label")
-        self.edit_input = Input(id="profile-edit-input")
+        self.edit_input = PasteInput(id="profile-edit-input")
         self.status_bar = StatusBar()
         self.footer_bar = FooterBar(context="profile")
 

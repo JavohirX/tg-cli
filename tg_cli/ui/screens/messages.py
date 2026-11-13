@@ -7,7 +7,9 @@ live message inserts with '↓ N new', and Tab toggling between LIST and WRITE f
 from __future__ import annotations
 
 import threading
+from collections import OrderedDict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 from rich.console import Group, RenderableType
 from rich.text import Text
@@ -18,7 +20,8 @@ from textual.containers import Container, Vertical
 from textual.events import DescendantFocus, Key
 from textual.screen import Screen
 from textual.widgets import Input, Static
-from pathlib import Path
+from tg_cli.domain.files import paste_disposition, upload_label, upload_progress_line
+from tg_cli.ui.paste import PasteInput, SendMediaDialog, claim_paste
 from tg_cli.domain.models import (
     Account,
     Chat,
@@ -89,6 +92,7 @@ class MessagesScreen(Screen):
         Binding("?", "show_help", "Help", show=False),
         Binding("f1", "show_help", "Help", show=False),
         Binding("ctrl+k", "show_palette", "Palette", show=False),
+        Binding("ctrl+v,shift+insert,ctrl+shift+v", "paste_clipboard", "Paste", show=False),
     ]
 
     def __init__(
@@ -112,15 +116,21 @@ class MessagesScreen(Screen):
         self._gap_after: dict[int, bool] = {}
         self._member_roles: dict[int, str] = {}
         self._is_loading_older: bool = False
+        # before_id of an older page that Telegram has not answered yet.
+        self._pending_before_id: int | None = None
         self._unseen_count: int = 0
         self.search_query: str = ""
         self._pending_confirm: tuple[str, Callable[[], None]] | None = None
+        # Height checks and the paint that follows share one render of a row.
+        self._line_cache: OrderedDict[tuple, list[Text]] = OrderedDict()
 
         self.chat_header = Static("", id="chat-header")
         self.status_bar = StatusBar()
         self.footer_bar = FooterBar(context="messages", is_write_mode=False)
         self.composer = Composer(id="message-composer")
-        self.filter_input = Input(placeholder="Search messages...", id="filter-input")
+        self.filter_input = PasteInput(placeholder="Search messages...", id="filter-input")
+        self._pending_file_paste: list[str] = []
+        self._paste_skipped: int = 0
 
         self.message_list = WindowedList[Any](
             items=[],
@@ -130,6 +140,7 @@ class MessagesScreen(Screen):
             item_height_fn=self._get_item_height,
             id="message-window-list",
             enable_digit_motion=False,
+            stripe=True,
         )
 
     def compose(self) -> ComposeResult:
@@ -196,7 +207,15 @@ class MessagesScreen(Screen):
         def handle():
             if event_type == "messages_changed":
                 if data.get("chat_id") == self.chat.chat_id:
-                    self._handle_live_message_event()
+                    before_id = data.get("before_id")
+                    if before_id is not None:
+                        # Older history, not a live arrival. Prepend it.
+                        self._apply_older_page(int(before_id))
+                    else:
+                        self._handle_live_message_event()
+            elif event_type == "fetch_messages_done":
+                if data.get("chat_id") == self.chat.chat_id:
+                    self._on_history_fetch_done(data)
             elif event_type == "roles_changed":
                 if data.get("error") or data.get("chat_id") != self.chat.chat_id:
                     return
@@ -289,7 +308,11 @@ class MessagesScreen(Screen):
         is_cursor: bool = False,
         is_selected: bool = False,
     ) -> list[Text]:
-        """Render one message. A blank line follows only the last line of a bundle."""
+        """Render one message. A blank line follows only the last line of a bundle.
+
+        The list is cached. Scrolling asks for the height of each visible
+        message and then paints those same lines.
+        """
         expanded = item.message_id in self.expanded_message_ids
         transcript_text = None
         if item.kind == MessageKind.VOICE:
@@ -299,6 +322,46 @@ class MessagesScreen(Screen):
         replied_msg = self._get_replied_message(item.reply_id) if item.reply_id else None
         direct, show_sender, show_time = self._message_layout(item)
         role = "" if direct else self._member_roles.get(item.sender_id, "")
+        reply_key = None
+        if replied_msg is not None:
+            reply_key = (
+                replied_msg.message_id,
+                replied_msg.plain_text,
+                replied_msg.caption,
+                replied_msg.sender_name,
+                replied_msg.outgoing,
+                replied_msg.kind,
+            )
+        key = (
+            item.message_id,
+            item.plain_text,
+            item.caption,
+            item.kind,
+            item.sender_name,
+            item.sender_id,
+            item.date,
+            item.edited,
+            item.send_state,
+            item.outgoing,
+            item.is_deleted,
+            item.forward_label,
+            item.reply_id,
+            width,
+            is_cursor,
+            is_selected,
+            expanded,
+            transcript_text,
+            reply_key,
+            direct,
+            show_sender,
+            show_time,
+            role,
+            self._gap_after.get(item.message_id, True),
+        )
+        cached = self._line_cache.get(key)
+        if cached is not None:
+            self._line_cache.move_to_end(key)
+            return cached
         lines = render_message(
             message=item,
             width=width,
@@ -314,6 +377,9 @@ class MessagesScreen(Screen):
         )
         if self._gap_after.get(item.message_id, True):
             lines.append(Text(""))
+        self._line_cache[key] = lines
+        if len(self._line_cache) > 1024:
+            self._line_cache.popitem(last=False)
         return lines
 
     def _scroll_to_latest(self) -> None:
@@ -360,7 +426,7 @@ class MessagesScreen(Screen):
 
         if isinstance(item, UnreadDivider):
             text = Text("───────── Unread Messages ─────────", justify="center")
-            text.stylize("bold bright_white on dark_blue")
+            text.stylize("dim")
             return text
 
         if isinstance(item, Message):
@@ -408,52 +474,105 @@ class MessagesScreen(Screen):
         else:
             self.status_bar.set_status(f"{len(messages)} messages loaded.")
 
+    def _history_fetch_pending(self, before_id: int) -> bool:
+        probe = getattr(self.gateway, "message_fetch_in_flight", None)
+        if probe is None:
+            return False
+        return bool(probe(self.account.user_id, self.chat.chat_id, before_id))
+
+    def _clear_history_wait(self) -> None:
+        self._pending_before_id = None
+        self._is_loading_older = False
+
+    def _read_older(self, before_id: int) -> list[Message]:
+        return self.gateway.get_messages(
+            account_id=self.account.user_id,
+            chat_id=self.chat.chat_id,
+            limit=50,
+            before_id=before_id,
+        )
+
     def load_older_messages(self) -> None:
-        """Page older messages when cursor hits the top."""
+        """Page older messages when the viewport hits the top."""
         if self._is_loading_older or not self._all_messages:
             return
 
-        oldest_msg = self._all_messages[0]
+        before_id = self._all_messages[0].message_id
         self._is_loading_older = True
         self.status_bar.set_status("Loading older history...")
-
+        waiting = False
         try:
-            older = self.gateway.get_messages(
-                account_id=self.account.user_id,
-                chat_id=self.chat.chat_id,
-                limit=50,
-                before_id=oldest_msg.message_id,
-            )
+            older = self._read_older(before_id)
+            if not older and self._history_fetch_pending(before_id):
+                # The local page is empty because this offset has not been
+                # stored yet. Telegram still may have older messages.
+                self._pending_before_id = before_id
+                waiting = True
+                return
+            if not older:
+                older = self._read_older(before_id)
+                if not older and self._history_fetch_pending(before_id):
+                    self._pending_before_id = before_id
+                    waiting = True
+                    return
             if not older:
                 self.status_bar.set_status("Beginning of history reached.")
                 return
-
-            # Combine older + current, avoiding duplicates
-            existing_ids = {m.message_id for m in self._all_messages}
-            new_older = [m for m in older if m.message_id not in existing_ids]
-            if not new_older:
-                return
-
-            for m in older:
-                self._message_cache[m.message_id] = m
-            prev_focused = self.message_list.get_focused_item()
-            self._all_messages = new_older + self._all_messages
-            new_items = self._build_stream_items(self._all_messages)
-
-            # Find new index of previously focused message to prevent cursor jumping
-            new_cursor = 0
-            if prev_focused is not None and isinstance(prev_focused, Message):
-                for idx, it in enumerate(new_items):
-                    if isinstance(it, Message) and it.message_id == prev_focused.message_id:
-                        new_cursor = idx
-                        break
-
-            self.message_list.set_items(new_items, keep_cursor=True)
-            self.message_list.cursor = new_cursor
-            self.message_list._ensure_cursor_visible()
-            self.status_bar.set_status(f"Loaded {len(new_older)} older messages.")
+            self._prepend_older(older)
         finally:
-            self._is_loading_older = False
+            if not waiting:
+                self._clear_history_wait()
+
+    def _apply_older_page(self, before_id: int) -> None:
+        """Merge a history page that just landed in the local cache."""
+        older = self._read_older(before_id)
+        if not older:
+            return
+        self._prepend_older(older)
+        if self._pending_before_id == before_id:
+            self._clear_history_wait()
+
+    def _on_history_fetch_done(self, data: dict[str, Any]) -> None:
+        before_id = data.get("before_id")
+        if before_id is None or before_id != self._pending_before_id:
+            return
+        if data.get("count"):
+            self._apply_older_page(int(before_id))
+            if self._pending_before_id == before_id:
+                self._clear_history_wait()
+            return
+        self._clear_history_wait()
+        if data.get("error"):
+            self.status_bar.set_status(str(data["error"]), is_error=True)
+            return
+        if data.get("exhausted"):
+            self.status_bar.set_status("Beginning of history reached.")
+
+    def _prepend_older(self, older: list[Message]) -> None:
+        """Insert an older page above the open window and keep the cursor."""
+        existing_ids = {m.message_id for m in self._all_messages}
+        new_older = [m for m in older if m.message_id not in existing_ids]
+        for message in older:
+            self._message_cache[message.message_id] = message
+        if not new_older:
+            self.status_bar.set_status(f"{len(self._all_messages)} messages loaded.")
+            return
+
+        prev_focused = self.message_list.get_focused_item()
+        self._all_messages = new_older + self._all_messages
+        new_items = self._build_stream_items(self._all_messages)
+
+        new_cursor = 0
+        if isinstance(prev_focused, Message):
+            for idx, item in enumerate(new_items):
+                if isinstance(item, Message) and item.message_id == prev_focused.message_id:
+                    new_cursor = idx
+                    break
+
+        self.message_list.set_items(new_items, keep_cursor=True)
+        self.message_list.cursor = new_cursor
+        self.message_list._ensure_cursor_visible()
+        self.status_bar.set_status(f"Loaded {len(new_older)} older messages.")
 
     def on_windowed_list_reached_top(self, event: WindowedList.ReachedTop) -> None:
         self.load_older_messages()
@@ -522,13 +641,83 @@ class MessagesScreen(Screen):
 
         self.refresh_messages(initial=False, jump_to_end=True)
 
+    def action_paste_clipboard(self) -> None:
+        from tg_cli.ui.paste import deliver_system_paste
+        deliver_system_paste(self.app)
+
+    def receive_file_paste(self, paths: list[str]) -> None:
+        """Send a pasted group of files. Media asks; anything else goes as files."""
+        files: list[str] = []
+        skipped = 0
+        for path in paths:
+            if Path(path).is_file():
+                files.append(str(Path(path)))
+            else:
+                skipped += 1
+        if not files:
+            self.status_bar.set_status("No files to send.", is_error=True)
+            return
+        if self.composer.edit_message_id is not None:
+            self.status_bar.set_status("Finish editing before sending files.", is_error=True)
+            return
+        if not claim_paste(self.app, "files\0" + "\0".join(files)):
+            return
+        self._pending_file_paste = files
+        self._paste_skipped = skipped
+        if paste_disposition(files) == "media":
+            self.app.push_screen(SendMediaDialog(files), callback=self._on_media_send_choice)
+            return
+        self._queue_file_send(files, as_file=True, skipped=skipped)
+
+    def _on_media_send_choice(self, choice: str | None) -> None:
+        paths = self._pending_file_paste
+        skipped = self._paste_skipped
+        self._pending_file_paste = []
+        self._paste_skipped = 0
+        if choice == "media":
+            self._queue_file_send(paths, as_file=False, skipped=skipped)
+        elif choice == "file":
+            self._queue_file_send(paths, as_file=True, skipped=skipped)
+        else:
+            self.status_bar.set_status("Send cancelled.")
+
+    def _queue_file_send(self, paths: list[str], *, as_file: bool, skipped: int = 0) -> None:
+        if not paths:
+            return
+        caption = self.composer.text.strip()
+        if len(caption) > 1024:
+            self.status_bar.set_status(
+                f"Caption is {len(caption)} characters. The limit is 1024.",
+                is_error=True,
+            )
+            return
+        reply_to = self.composer.reply_to_id
+        self.gateway.send_files(
+            self.account.user_id,
+            self.chat.chat_id,
+            paths,
+            as_file=as_file,
+            caption=caption,
+            reply_to_id=reply_to,
+        )
+        self.gateway.clear_draft(self.account.user_id, self.chat.chat_id)
+        self.composer.clear()
+        status = upload_progress_line(upload_label(paths, as_file=as_file), 0, 1)
+        if skipped:
+            status += f" Skipped {skipped}."
+        self.refresh_messages(initial=False, jump_to_end=True)
+        self.status_bar.set_status(status)
+
     def on_windowed_list_item_activated(self, event: WindowedList.ItemActivated) -> None:
         if isinstance(event.item, Message) and event.item.send_state == SendState.FAILED:
-            self.gateway.retry_failed_message(
+            retried = self.gateway.retry_failed_message(
                 self.account.user_id,
                 self.chat.chat_id,
                 event.item.message_id,
             )
+            if retried is False:
+                self.status_bar.set_status("That message cannot be sent again.", is_error=True)
+                return
             self.status_bar.set_status(f"Retrying message #{event.item.message_id}...")
             self.refresh_messages(initial=False)
 

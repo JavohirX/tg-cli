@@ -110,6 +110,8 @@ class Message:
     outgoing: bool = False
     send_state: SendState = SendState.SENT
     is_deleted: bool = False
+    # Absolute path of a file this row is still trying to send. Empty once Telegram has it.
+    local_path: str = ""
 
     @property
     def identity(self) -> tuple[int, int, int]:

@@ -88,8 +88,44 @@ def test_map_dialog():
     assert chat.unread_count == 5
     assert chat.pinned is True
     assert chat.archived is False
+    assert chat.muted is False
     assert chat.last_message_id == 999
     assert chat.last_preview == "Hello world!"
+
+
+def test_map_dialog_reads_archive_and_mute_from_telegram():
+    future = datetime(2038, 1, 19, tzinfo=timezone.utc)
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    archived = SimpleNamespace(
+        id=7,
+        name="Saved",
+        unread_count=0,
+        pinned=False,
+        archived=False,
+        folder_id=1,
+        entity=None,
+        notify_settings=None,
+        dialog=SimpleNamespace(notify_settings=SimpleNamespace(mute_until=future)),
+        message=None,
+    )
+    chat = map_telethon_dialog_to_chat(archived, account_id=1)
+    assert chat.archived is True
+    assert chat.muted is True
+
+    expired = SimpleNamespace(
+        id=8,
+        name="Open",
+        unread_count=0,
+        pinned=False,
+        archived=False,
+        folder_id=None,
+        entity=None,
+        notify_settings=SimpleNamespace(mute_until=past),
+        message=None,
+    )
+    chat = map_telethon_dialog_to_chat(expired, account_id=1)
+    assert chat.archived is False
+    assert chat.muted is False
 
 
 def test_map_message_with_reply_and_voice():

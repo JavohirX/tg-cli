@@ -219,6 +219,52 @@ async def test_windowed_list_click_navigation_and_activation():
 
 
 @pytest.mark.asyncio
+async def test_reused_row_paints_the_same_lines():
+    """A row object kept by the caller is painted once and reused."""
+    from rich.console import Group
+
+    lines = [Text(f"line {i}") for i in range(3)]
+
+    class ReuseApp(App):
+        def compose(self) -> ComposeResult:
+            yield WindowedList[str](
+                items=["only"],
+                renderer=lambda item, w, cur, sel: Group(*lines),
+                item_height_fn=lambda item: 3,
+                id_fn=lambda item: item,
+                id="list",
+            )
+
+    app = ReuseApp()
+    async with app.run_test(size=(40, 8)) as pilot:
+        widget = app.query_one("#list", WindowedList)
+        await pilot.pause()
+        first = [widget.render_line(y).text.rstrip() for y in range(3)]
+        widget.refresh()
+        await pilot.pause()
+        second = [widget.render_line(y).text.rstrip() for y in range(3)]
+        assert first == ["line 0", "line 1", "line 2"]
+        assert second == first
+
+
+def test_scroll_measures_the_page_and_not_the_whole_list():
+    """A notch counts lines until the step fits. It does not walk every row."""
+    seen: list[int] = []
+
+    def height(item: int) -> int:
+        seen.append(item)
+        return 1
+
+    items = list(range(500))
+    widget = WindowedList[int](items=items, item_height_fn=height, id_fn=lambda item: item)
+    seen.clear()
+    widget._scroll_by_lines(WHEEL_LINES)
+    assert widget.cursor == WHEEL_LINES
+    assert seen
+    assert max(seen) < 40
+
+
+@pytest.mark.asyncio
 async def test_windowed_list_mouse_scroll():
     """One wheel notch moves several lines, then back to the top."""
     items = [f"Item {i}" for i in range(10)]
@@ -372,4 +418,128 @@ async def test_right_click_copies_the_message_under_the_pointer(monkeypatch):
         await pilot.pause()
         w.on_mouse_down(MouseDown(w, 0, 0, 0, 0, 3, False, False, False))
         assert copied == ["hello from the row"]
+
+
+def _cell_backgrounds(strip) -> list[str | None]:
+    """Background name of each cell. None means the segment has no background."""
+    cells: list[str | None] = []
+    for segment in strip:
+        if segment.control:
+            continue
+        style = segment.style
+        color = None if style is None else style.bgcolor
+        name = None if color is None else color.name.lower()
+        cells.extend([name] * segment.cell_length)
+    return cells
+
+
+_DARK = "#080808"
+_LIGHT = "#1c1c1c"
+
+
+@pytest.mark.asyncio
+async def test_stripe_is_one_shade_per_message():
+    """Every line of a message shares a shade. The next message takes the other."""
+    from rich.console import Group
+
+    class BandApp(App):
+        def compose(self) -> ComposeResult:
+            yield WindowedList[str](
+                items=["tall", "next"],
+                renderer=lambda item, w, cur, sel: Group(
+                    *(Text(f"{item}-{i}") for i in range(4))
+                ),
+                item_height_fn=lambda item: 4,
+                id_fn=lambda item: item,
+                stripe=True,
+                id="list",
+            )
+
+    app = BandApp()
+    async with app.run_test(size=(40, 4)) as pilot:
+        w = app.query_one("#list", WindowedList)
+        await pilot.pause()
+        tall = [_cell_backgrounds(w.render_line(y))[0] for y in range(4)]
+        assert tall == [_DARK] * 4
+        assert "tall-0" in w.render_line(0).text
+
+        w._scroll_by_lines(1)
+        await pilot.pause()
+        assert "tall-1" in w.render_line(0).text
+        assert [_cell_backgrounds(w.render_line(y))[0] for y in range(3)] == [_DARK] * 3
+        assert _cell_backgrounds(w.render_line(3))[0] == _LIGHT
+        assert "next-0" in w.render_line(3).text
+
+        w._scroll_by_lines(3)
+        await pilot.pause()
+        assert "next-0" in w.render_line(0).text
+        assert [_cell_backgrounds(w.render_line(y))[0] for y in range(4)] == [_LIGHT] * 4
+
+
+@pytest.mark.asyncio
+async def test_stripe_leaves_cursor_badge_and_selection_colors():
+    """A band fills plain cells. Cursor, unread, and a drag keep their own colors."""
+    from datetime import datetime, timezone
+    from textual.geometry import Offset
+    from textual.selection import Selection
+    from tg_cli.domain.models import Chat, ChatKind
+    from tg_cli.domain.render import render_chat_row
+
+    def row(chat: Chat, width: int, is_cursor: bool, is_selected: bool):
+        return render_chat_row(
+            chat, width, is_cursor=is_cursor, is_selected=is_selected
+        )
+
+    chats = [
+        Chat(
+            account_id=1,
+            chat_id=1,
+            title="Ada",
+            kind=ChatKind.USER,
+            unread_count=3,
+            last_date=datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc),
+            last_preview="hello",
+        ),
+        Chat(
+            account_id=1,
+            chat_id=2,
+            title="Bea",
+            kind=ChatKind.USER,
+            last_date=datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc),
+            last_preview="there",
+        ),
+    ]
+
+    class ChatApp(App):
+        def compose(self) -> ComposeResult:
+            yield WindowedList[Chat](
+                items=chats,
+                renderer=row,
+                id_fn=lambda chat: chat.chat_id,
+                stripe=True,
+                id="list",
+            )
+
+    app = ChatApp()
+    async with app.run_test(size=(80, 8)) as pilot:
+        w = app.query_one("#list", WindowedList)
+        await pilot.pause()
+        # Row 0 is the cursor, so grey15 covers it. Move the cursor off it.
+        w.cursor = 1
+        w.refresh()
+        await pilot.pause()
+
+        plain = _cell_backgrounds(w.render_line(0))
+        assert _DARK in plain
+        assert "blue" in plain
+        cursor = _cell_backgrounds(w.render_line(1))
+        assert cursor[0] == "grey15"
+        assert all(bg == "grey15" for bg in cursor)
+
+        w.screen.selections = {
+            w: Selection.from_offsets(Offset(2, 0), Offset(6, 0)),
+        }
+        selected = _cell_backgrounds(w.render_line(0))
+        assert selected[2] != plain[2]
+        assert selected[0] == plain[0]
 

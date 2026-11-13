@@ -1,6 +1,7 @@
 """Tests for SQLite database schema and repo operations."""
 
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 import pytest
 from tg_cli.domain.models import (
@@ -19,6 +20,8 @@ from tg_cli.store.repo import (
     archive_chats,
     clear_draft,
     delete_account,
+    cancel_chat_deletes,
+    claim_due_chat_deletes,
     delete_chats,
     delete_messages,
     get_accounts,
@@ -29,7 +32,9 @@ from tg_cli.store.repo import (
     get_messages,
     mark_chats_read,
     mute_chats,
+    pending_delete_ids,
     save_draft,
+    schedule_chat_deletes,
     upsert_account,
     upsert_chats,
     upsert_folders,
@@ -134,6 +139,25 @@ def test_folders_and_chats(conn):
     assert c10.unread_count == 0
     c20 = get_chat(conn, account_id=1, chat_id=20)
     assert c20.muted is True
+
+
+def test_pending_chat_delete_waits_for_undo(conn):
+    schedule_chat_deletes(conn, account_id=1, chat_ids=[10, 20])
+    assert pending_delete_ids(conn, 1) == {10, 20}
+    assert claim_due_chat_deletes(conn) == []
+    assert pending_delete_ids(conn, 1) == {10, 20}
+
+    cancel_chat_deletes(conn, account_id=1, chat_ids=[10])
+    assert pending_delete_ids(conn, 1) == {20}
+
+    claimed = claim_due_chat_deletes(conn, now=time.time() + 30)
+    assert claimed == [(1, 20, 0)]
+    assert pending_delete_ids(conn, 1) == set()
+
+    schedule_chat_deletes(conn, account_id=1, chat_ids=[20], delay=30)
+    forced = claim_due_chat_deletes(conn, force=True)
+    assert forced == [(1, 20, 0)]
+    assert pending_delete_ids(conn, 1) == set()
 
 
 def test_messages_and_drafts(conn):

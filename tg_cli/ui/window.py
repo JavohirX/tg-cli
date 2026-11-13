@@ -6,15 +6,21 @@ not widgets, allowing 10,000+ items to scroll at 60fps without lag.
 from __future__ import annotations
 
 import time
+from collections import OrderedDict
 from typing import Any, Callable, Generic, Sequence, TypeVar
-from rich.console import Group, RenderableType
+from rich.color import Color
+from rich.console import Console, ConsoleOptions, Group, RenderableType
+from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
+from textual.css.styles import RulesMap
 from textual.events import Click, Key, MouseDown, MouseScrollDown, MouseScrollUp, Resize
 from textual.message import Message as TextualMessage
 from textual.selection import Selection
 from textual.strip import Strip
+from textual.style import Style as VisualStyle
+from textual.visual import RenderOptions, Visual
 from textual.widget import Widget
 from tg_cli.domain.render import slice_by_cells
 from tg_cli.ui.clipboard import copy_text
@@ -23,7 +29,85 @@ from tg_cli.ui.clipboard import copy_text
 # notch is what reads as smooth, and it is faster than one row per notch.
 WHEEL_LINES = 6
 
+# One step either side of the #121212 theme background on the 256-color gray
+# ramp (232=#080808, 233=#121212, 234=#1c1c1c). Cursor grey15 is #262626, so
+# the highlight stays lighter than both bands. Closer hex values collapse to
+# the same cell and the stripe disappears.
+_STRIPE_DARK = Color.parse("#080808")
+_STRIPE_LIGHT = Color.parse("#1c1c1c")
+
 T = TypeVar("T")
+
+# Painted lines of a row. The row object is held so its id cannot be reused
+# while the entry exists.
+_StripCacheEntry = tuple[RenderableType, tuple, list[Strip]]
+
+
+def _style_token(style: VisualStyle) -> tuple:
+    """Value of the base style. A new Style object with the same colors hits."""
+    rich = style.rich_style
+    return (
+        None if rich.color is None else rich.color.name,
+        None if rich.bgcolor is None else rich.bgcolor.name,
+        bool(rich.bold),
+        bool(rich.dim),
+        bool(rich.italic),
+        bool(rich.reverse),
+    )
+
+
+def _line_count(renderable: RenderableType) -> int:
+    if isinstance(renderable, Text):
+        return renderable.plain.count("\n") + 1
+    if isinstance(renderable, Group):
+        return sum(_line_count(part) for part in renderable.renderables) or 1
+    return 1
+
+
+class _RowVisual(Visual):
+    """Stitches one strip cache per line. A scroll paints only the new rows."""
+
+    def __init__(self, widget: WindowedList, rows: list[RenderableType]) -> None:
+        self._widget = widget
+        self._rows = rows
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions):
+        """Rich print of render() still sees the rows. Textual uses render_strips."""
+        yield from console.render(Group(*self._rows), options)
+
+    def get_optimal_width(self, rules: RulesMap, container_width: int) -> int:
+        return container_width
+
+    def get_height(self, rules: RulesMap, width: int) -> int:
+        return sum(_line_count(row) for row in self._rows) or 1
+
+    def render_strips(
+        self,
+        width: int,
+        height: int | None,
+        style: VisualStyle,
+        options: RenderOptions,
+    ) -> list[Strip]:
+        strips: list[Strip] = []
+        stripe = self._widget.stripe
+        # One shade per item. Every line of a message, including the gap
+        # under it, stays in that shade. The next item takes the other.
+        base_bg = style.rich_style.bgcolor if stripe else None
+        line_no = 0
+        for row_index, row in enumerate(self._rows):
+            color = (
+                _STRIPE_LIGHT
+                if (self._widget.top_index + row_index) & 1
+                else _STRIPE_DARK
+            )
+            for strip in self._widget._strips_for(row, width, style):
+                if stripe:
+                    strip = _apply_stripe(strip, width, color, base_bg)
+                strips.append(strip)
+                line_no += 1
+                if height is not None and line_no >= height:
+                    return strips
+        return strips
 
 
 class WindowedList(Widget, Generic[T]):
@@ -111,6 +195,7 @@ class WindowedList(Widget, Generic[T]):
         id_fn: Callable[[T], Any] | None = None,
         is_selectable_fn: Callable[[T], bool] | None = None,
         item_height_fn: Callable[[T], int] | None = None,
+        stripe: bool = False,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -123,6 +208,9 @@ class WindowedList(Widget, Generic[T]):
         self._id_fn = id_fn or (lambda item: getattr(item, "identity", id(item)))
         self._is_selectable_fn = is_selectable_fn or (lambda item: True)
         self._item_height_fn = item_height_fn
+        # One near-black band per item. Off for accounts and sessions; the
+        # chat list and the message list turn it on.
+        self.stripe = stripe
 
         self.cursor: int = 0
         self.top_index: int = 0
@@ -134,6 +222,7 @@ class WindowedList(Widget, Generic[T]):
         self.digit_buffer: str = ""
         self._last_click_time: float = 0.0
         self._last_click_idx: int | None = None
+        self._strip_cache: OrderedDict[tuple, _StripCacheEntry] = OrderedDict()
 
         # Find first selectable item
         self._adjust_cursor_to_selectable(1)
@@ -486,7 +575,11 @@ class WindowedList(Widget, Generic[T]):
         anchor_row = self._cursor_screen_row()
         viewport = self._viewport_height()
         if delta > 0:
-            room = self._height_from(self.top_index, len(self._items) - 1) - viewport
+            # Only `delta` lines past the viewport decide whether the notch
+            # fits. Counting the rest of a long history wraps every message.
+            room = self._height_from(
+                self.top_index, len(self._items) - 1, viewport + delta
+            ) - viewport
             delta = min(delta, max(0, room))
             if delta <= 0:
                 return
@@ -644,7 +737,9 @@ class WindowedList(Widget, Generic[T]):
             accum_lines += h
             idx += 1
 
-        return Group(*lines)
+        if not lines:
+            return Text("")
+        return _RowVisual(self, lines)
 
     def _crop_top(
         self, rendered: RenderableType, skip: int, height: int
@@ -660,6 +755,42 @@ class WindowedList(Widget, Generic[T]):
         if skip >= height:
             return Text(""), 0
         return rendered, height
+
+    def _strips_for(
+        self, renderable: RenderableType, width: int, style: VisualStyle
+    ) -> list[Strip]:
+        """Strips for one row. A Group is one cached line per child."""
+        if isinstance(renderable, Group):
+            strips: list[Strip] = []
+            for part in renderable.renderables:
+                strips.extend(self._strips_for(part, width, style))
+            return strips
+        token = _style_token(style)
+        key = (id(renderable), width, token)
+        hit = self._strip_cache.get(key)
+        if hit is not None and hit[0] is renderable:
+            self._strip_cache.move_to_end(key)
+            return hit[2]
+        strips = self._paint_row(renderable, width, style)
+        self._strip_cache[key] = (renderable, token, strips)
+        if len(self._strip_cache) > 2048:
+            self._strip_cache.popitem(last=False)
+        return strips
+
+    def _paint_row(
+        self, renderable: RenderableType, width: int, style: VisualStyle
+    ) -> list[Strip]:
+        """Same conversion Textual uses for one Rich renderable."""
+        console = self.app.console
+        options = self.app.console_options.update(highlight=False, width=width, height=None)
+        styled = self.post_render(renderable, style.rich_style)
+        segments = console.render(styled, options)
+        return [
+            Strip(line)
+            for line in Segment.split_and_crop_lines(
+                segments, width, include_new_lines=False, pad=False
+            )
+        ]
 
     def on_resize(self, event: Resize) -> None:
         self._ensure_cursor_visible()
@@ -845,6 +976,62 @@ class WindowedList(Widget, Generic[T]):
         self._scroll_by_lines(-WHEEL_LINES)
 
 
+def _is_plain_background(color: Color | None, base: Color | None) -> bool:
+    """True when the background is the widget fill, not a cursor, badge, or selection.
+
+    Named colors such as blue and grey15 have no RGB triplet. Treating a missing
+    triplet as "no color" paints the band over the unread badge and the cursor.
+    """
+    if color is None or color.is_default:
+        return True
+    if base is None or base.is_default:
+        return False
+    if color == base:
+        return True
+    return (
+        color.triplet is not None
+        and base.triplet is not None
+        and color.triplet == base.triplet
+    )
+
+
+def _replace_bg(style: Style | None, bgcolor: Color) -> Style:
+    """Same style with a new background. The copy must drop the cached ANSI."""
+    if style is None:
+        return Style(bgcolor=bgcolor)
+    copied = style.copy()
+    copied._bgcolor = bgcolor
+    copied._ansi = None
+    copied._hash = None
+    copied._style_definition = None
+    return copied
+
+
+def _apply_stripe(
+    strip: Strip,
+    width: int,
+    bgcolor: Color,
+    base_bg: Color | None,
+) -> Strip:
+    """Paint one band across a line. Cursor, selection, and badges keep their own."""
+    segments: list[Segment] = []
+    changed = False
+    for segment in strip:
+        style = segment.style
+        seg_bg = None if style is None else style.bgcolor
+        if segment.control or not _is_plain_background(seg_bg, base_bg):
+            segments.append(segment)
+            continue
+        segments.append(
+            Segment(segment.text, _replace_bg(style, bgcolor), segment.control)
+        )
+        changed = True
+    painted = Strip(segments) if changed else strip
+    if painted.cell_length < width:
+        return painted.extend_cell_length(width, Style(bgcolor=bgcolor))
+    return painted
+
+
 def _paint_selection(strip: Strip, start: int, end: int, style: Style) -> Strip:
     """Paint the selected cell range. `end < 0` means the rest of the line."""
     width = strip.cell_length
@@ -854,6 +1041,12 @@ def _paint_selection(strip: Strip, start: int, end: int, style: Style) -> Strip:
     if start >= end:
         return strip
     left = strip.crop(0, start)
-    mid = strip.crop(start, end).apply_style(style)
+    mid = strip.crop(start, end)
+    # The selection sits on top of the band. apply_style() puts the new style
+    # underneath, and a segment that already has a background would hide it.
+    painted = Strip(
+        list(Segment.apply_style(mid, post_style=style)),
+        mid.cell_length,
+    )
     right = strip.crop(end, width)
-    return Strip.join([left, mid, right])
+    return Strip.join([left, painted, right])

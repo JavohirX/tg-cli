@@ -206,7 +206,7 @@ COMMANDS: tuple[Command, ...] = (
         display_key="a",
         contexts=("chats",),
         undoable=True,
-        description="Toggle archive status for selected chat(s)",
+        description="Archive or unarchive the selected chat(s) on Telegram",
     ),
     Command(
         id="mute_chat",
@@ -215,7 +215,7 @@ COMMANDS: tuple[Command, ...] = (
         display_key="m",
         contexts=("chats",),
         undoable=True,
-        description="Toggle mute status for selected chat(s)",
+        description="Mute or unmute the selected chat(s) on Telegram",
     ),
     Command(
         id="mark_read",
@@ -243,7 +243,7 @@ COMMANDS: tuple[Command, ...] = (
         contexts=("chats",),
         undoable=True,
         destructive=True,
-        description="Delete chat for me (undoable within 5s)",
+        description="Delete the chat for me on Telegram (undoable within 5s)",
     ),
     Command(
         id="undo",

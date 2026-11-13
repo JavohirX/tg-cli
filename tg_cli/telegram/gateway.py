@@ -88,6 +88,22 @@ class Gateway(Protocol):
         """Send a message to a chat."""
         ...
 
+    def send_files(
+        self,
+        account_id: int,
+        chat_id: int,
+        paths: Sequence[str],
+        *,
+        as_file: bool,
+        caption: str = "",
+        reply_to_id: int | None = None,
+    ) -> list[Message]:
+        """Send files. `as_file` sends documents; otherwise photos and videos.
+
+        More than one path is one album, split into albums of 10.
+        """
+        ...
+
     def edit_message(
         self,
         account_id: int,
@@ -113,7 +129,7 @@ class Gateway(Protocol):
         chat_ids: Sequence[int],
         archived: bool = True,
     ) -> None:
-        """Set archive status for chats."""
+        """Archive or unarchive chats on Telegram."""
         ...
 
     def mute_chats(
@@ -122,7 +138,7 @@ class Gateway(Protocol):
         chat_ids: Sequence[int],
         muted: bool = True,
     ) -> None:
-        """Set mute status for chats."""
+        """Mute or unmute chats on Telegram."""
         ...
 
     def mark_chats_read(
@@ -139,7 +155,7 @@ class Gateway(Protocol):
         account_id: int,
         chat_ids: Sequence[int],
     ) -> None:
-        """Delete chats for current user."""
+        """Delete chats for this account on Telegram. Undo can cancel it for a few seconds."""
         ...
 
     def restore_chats(
