@@ -91,6 +91,15 @@ class Chat:
     def identity(self) -> tuple[int, int]:
         return (self.account_id, self.chat_id)
 
+    @property
+    def deletes_for_everyone(self) -> bool:
+        """Channels and supergroups have no delete-for-me.
+
+        Their marked ids start at -100 followed by 10 digits; basic groups
+        have short negative ids.
+        """
+        return self.kind == ChatKind.CHANNEL or self.chat_id <= -1_000_000_000_000
+
 
 @dataclass(slots=True)
 class Message:

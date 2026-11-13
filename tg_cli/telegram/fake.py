@@ -67,6 +67,9 @@ class FakeGateway:
 
         self.chats: dict[int, dict[int, Chat]] = {acc.user_id: {} for acc in self.accounts}
         self.messages: dict[tuple[int, int], list[Message]] = {}
+        # Deleted inside the undo window, so restore_messages can put them back.
+        self.deleted_messages: dict[tuple[int, int], dict[int, Message]] = {}
+        self.delete_calls: list[tuple[int, int, list[int], bool]] = []
         self.drafts: dict[tuple[int, int], Draft] = {}
         self.transcripts: dict[tuple[int, int, int], Transcript] = {}
         self.sent_files: list[dict] = []
@@ -434,7 +437,7 @@ class FakeGateway:
         search_query: str = "",
     ) -> list[Message]:
         msgs = self.messages.get((account_id, chat_id), [])
-        if not msgs:
+        if (account_id, chat_id) not in self.messages:
             # Generate placeholder messages on the fly if needed
             now = datetime.now(timezone.utc)
             msgs = [
@@ -569,13 +572,29 @@ class FakeGateway:
         account_id: int,
         chat_id: int,
         message_ids: Sequence[int],
+        revoke: bool = False,
     ) -> None:
         target_set = set(message_ids)
         msgs = self.messages.get((account_id, chat_id), [])
-        for m in msgs:
-            if m.message_id in target_set:
-                m.is_deleted = True
-                m.plain_text = "[deleted]"
+        stash = self.deleted_messages.setdefault((account_id, chat_id), {})
+        for m in [m for m in msgs if m.message_id in target_set]:
+            stash[m.message_id] = m
+            msgs.remove(m)
+        self.delete_calls.append((account_id, chat_id, list(message_ids), revoke))
+
+    def restore_messages(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_ids: Sequence[int],
+    ) -> None:
+        stash = self.deleted_messages.get((account_id, chat_id), {})
+        msgs = self.messages.setdefault((account_id, chat_id), [])
+        for mid in message_ids:
+            m = stash.pop(mid, None)
+            if m is not None:
+                msgs.append(m)
+        msgs.sort(key=lambda m: m.message_id)
 
     def archive_chats(
         self,

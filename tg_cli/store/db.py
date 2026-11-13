@@ -112,6 +112,16 @@ CREATE TABLE IF NOT EXISTS pending_chat_deletes (
     PRIMARY KEY (account_id, chat_id)
 );
 
+CREATE TABLE IF NOT EXISTS pending_message_deletes (
+    account_id INTEGER NOT NULL,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    revoke INTEGER NOT NULL DEFAULT 0,
+    not_before REAL NOT NULL,
+    attempts INTEGER DEFAULT 0,
+    PRIMARY KEY (account_id, chat_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS pushed_dialog_state (
     account_id INTEGER PRIMARY KEY
 );

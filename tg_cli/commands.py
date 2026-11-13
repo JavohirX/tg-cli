@@ -286,8 +286,17 @@ COMMANDS: tuple[Command, ...] = (
         display_key="d",
         contexts=("messages",),
         undoable=True,
+        description="Delete focused or selected messages for me (asks in supergroups and channels)",
+    ),
+    Command(
+        id="delete_message_everyone",
+        title="Delete for Everyone",
+        keys=("D",),
+        display_key="D",
+        contexts=("messages",),
+        undoable=True,
         destructive=True,
-        description="Delete focused message",
+        description="Delete focused or selected messages for everyone",
     ),
     Command(
         id="transcribe_voice",

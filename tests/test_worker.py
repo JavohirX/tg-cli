@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from tg_cli.domain.files import send_groups
-from tg_cli.domain.models import Account, AuthState, Chat, MessageKind, SendState
+from tg_cli.domain.models import Account, AuthState, Chat, Message, MessageKind, SendState
 from tg_cli.store.repo import (
     get_accounts,
     get_chats,
@@ -15,6 +15,7 @@ from tg_cli.store.repo import (
     pending_delete_ids,
     upsert_account,
     upsert_chats,
+    upsert_messages,
 )
 from tg_cli.telegram.telethon_gw import TelethonGateway
 from tg_cli.telegram.worker import MUTE_UNTIL_FOREVER, FetchMessagesCmd
@@ -43,6 +44,8 @@ class MockTelethonClient:
         self.fail_file_sends = 0
         self.folder_edits: list[dict] = []
         self.deleted_dialogs: list[dict] = []
+        self.deleted_messages: list[dict] = []
+        self.fail_message_deletes = 0
         self.requests: list[object] = []
         self.dialogs: list[object] = []
         self.archive_dialogs: list[object] | None = None
@@ -108,7 +111,11 @@ class MockTelethonClient:
         m.edit_date = datetime.now(timezone.utc)
         return m
 
-    async def delete_messages(self, entity, message_ids):
+    async def delete_messages(self, entity, message_ids, revoke=True):
+        if self.fail_message_deletes:
+            self.fail_message_deletes -= 1
+            raise RuntimeError("delete refused")
+        self.deleted_messages.append({"entity": entity, "ids": list(message_ids), "revoke": revoke})
         return len(message_ids)
 
     async def send_read_acknowledge(self, entity):
@@ -700,6 +707,106 @@ def test_delete_waits_for_undo_then_reaches_telegram(tmp_path):
     finally:
         gw.stop()
     assert mock_client.deleted_dialogs == [{"entity": 31, "revoke": False}]
+
+
+def _gateway_with_messages(tmp_path, name, ids):
+    gw = TelethonGateway(db_path=tmp_path / name)
+    gw.start()
+    upsert_account(gw.conn, Account(user_id=777, phone="+12025550177", display_name="Mock User"))
+    upsert_chats(gw.conn, [Chat(account_id=777, chat_id=40, title="Messages")])
+    upsert_messages(gw.conn, [
+        Message(account_id=777, chat_id=40, message_id=mid, plain_text=f"m{mid}")
+        for mid in ids
+    ])
+    return gw
+
+
+def _ids(gw):
+    return [m.message_id for m in get_messages(gw.conn, 777, 40)]
+
+
+def _pending_message_deletes(gw):
+    return gw.conn.execute("SELECT COUNT(*) FROM pending_message_deletes").fetchone()[0]
+
+
+def test_message_delete_waits_for_undo_then_reaches_telegram(tmp_path):
+    gw = _gateway_with_messages(tmp_path, "gw_delete_messages.db", [1, 2, 3])
+    mock_client = MockTelethonClient()
+    try:
+        gw.worker.clients[777] = mock_client
+        gw.delete_messages(777, 40, [1])
+        assert _ids(gw) == [2, 3]
+        time.sleep(0.2)
+        assert mock_client.deleted_messages == []
+        gw.restore_messages(777, 40, [1])
+        assert _ids(gw) == [1, 2, 3]
+
+        gw.delete_messages(777, 40, [2, 3], revoke=True)
+        gw.conn.execute("UPDATE pending_message_deletes SET not_before = 0")
+        assert _wait_until(lambda: len(mock_client.deleted_messages) == 1)
+        assert mock_client.deleted_messages[0] == {"entity": 40, "ids": [2, 3], "revoke": True}
+        assert _wait_until(lambda: _pending_message_deletes(gw) == 0)
+        assert _ids(gw) == [1]
+    finally:
+        gw.stop()
+
+
+def test_message_delete_that_keeps_failing_shows_the_messages_again(tmp_path):
+    gw = _gateway_with_messages(tmp_path, "gw_delete_messages_fail.db", [1, 2])
+    mock_client = MockTelethonClient()
+    mock_client.fail_message_deletes = 99
+    events: list[tuple[str, dict]] = []
+    gw.register_listener(lambda evt, data: events.append((evt, data)))
+    try:
+        gw.worker.clients[777] = mock_client
+        gw.delete_messages(777, 40, [2])
+        assert _ids(gw) == [1]
+
+        def retry_now() -> bool:
+            gw.conn.execute("UPDATE pending_message_deletes SET not_before = 0")
+            return _ids(gw) == [1, 2]
+
+        assert _wait_until(retry_now, timeout=8.0)
+        assert any(evt == "status" and data.get("is_error") for evt, data in events)
+    finally:
+        gw.stop()
+
+
+def test_local_placeholder_delete_never_reaches_telegram(tmp_path):
+    gw = _gateway_with_messages(tmp_path, "gw_delete_local.db", [-3, 5])
+    mock_client = MockTelethonClient()
+    try:
+        gw.worker.clients[777] = mock_client
+        gw.delete_messages(777, 40, [-3])
+        gw.conn.execute("UPDATE pending_message_deletes SET not_before = 0")
+        assert _wait_until(lambda: _pending_message_deletes(gw) == 0)
+        assert _ids(gw) == [5]
+        assert mock_client.deleted_messages == []
+    finally:
+        gw.stop()
+
+
+def test_quit_sends_a_message_delete_that_was_still_undoable(tmp_path):
+    gw = _gateway_with_messages(tmp_path, "gw_delete_messages_quit.db", [1])
+    mock_client = MockTelethonClient()
+    try:
+        gw.worker.clients[777] = mock_client
+        gw.delete_messages(777, 40, [1])
+        assert mock_client.deleted_messages == []
+    finally:
+        gw.stop()
+    assert mock_client.deleted_messages == [{"entity": 40, "ids": [1], "revoke": False}]
+
+
+def test_new_placeholder_ids_start_below_last_runs(tmp_path):
+    db_file = tmp_path / "gw_temp_ids.db"
+    gw = _gateway_with_messages(tmp_path, "gw_temp_ids.db", [-7, 5])
+    gw.stop()
+    gw = TelethonGateway(db_path=db_file)
+    try:
+        assert gw._temp_msg_counter == -8
+    finally:
+        gw.conn.close()
 
 
 def test_quit_sends_a_delete_that_was_still_undoable(tmp_path):

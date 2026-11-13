@@ -30,9 +30,9 @@ from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
     archive_chats as repo_archive_chats,
     cancel_chat_deletes,
+    cancel_message_deletes,
     clear_draft as repo_clear_draft,
     delete_chats as repo_delete_chats,
-    delete_messages as repo_delete_messages,
     get_account_unread_counts as repo_get_account_unread_counts,
     get_accounts as repo_get_accounts,
     get_chat as repo_get_chat,
@@ -43,9 +43,11 @@ from tg_cli.store.repo import (
     get_message as repo_get_message,
     get_transcript as repo_get_transcript,
     mark_chats_read as repo_mark_chats_read,
+    min_message_id,
     mute_chats as repo_mute_chats,
     save_draft as repo_save_draft,
     schedule_chat_deletes,
+    schedule_message_deletes,
     upsert_account as repo_upsert_account,
     upsert_chats as repo_upsert_chats,
     upsert_messages as repo_upsert_messages,
@@ -58,7 +60,6 @@ from tg_cli.telegram.worker import (
     CancelLoginCmd,
     CancelQrLoginCmd,
     ConnectAccountsCmd,
-    DeleteMessagesCmd,
     DisconnectAccountCmd,
     EditMessageCmd,
     FetchMessagesCmd,
@@ -100,7 +101,9 @@ class TelethonGateway:
             event_callback=self._on_worker_event,
             db_path=db_path,
         )
-        self._temp_msg_counter = -1
+        # Placeholders count down from below any id left by an earlier run,
+        # so a new send cannot overwrite a failed one from last time.
+        self._temp_msg_counter = min(-1, min_message_id(self.conn) - 1)
         self._lock = threading.Lock()
         self._in_flight_fetches: set[tuple[int, int, int | None]] = set()
         self._last_fetch_time: dict[tuple[int, int, int | None], float] = {}
@@ -405,15 +408,17 @@ class TelethonGateway:
         account_id: int,
         chat_id: int,
         message_ids: Sequence[int],
+        revoke: bool = False,
     ) -> None:
-        repo_delete_messages(self.conn, account_id, chat_id, message_ids)
-        self.worker.submit_command(
-            DeleteMessagesCmd(
-                account_id=account_id,
-                chat_id=chat_id,
-                message_ids=message_ids,
-            )
-        )
+        schedule_message_deletes(self.conn, account_id, chat_id, message_ids, revoke)
+
+    def restore_messages(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_ids: Sequence[int],
+    ) -> None:
+        cancel_message_deletes(self.conn, account_id, chat_id, message_ids)
 
     def archive_chats(
         self,

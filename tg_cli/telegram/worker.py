@@ -33,16 +33,20 @@ from tg_cli.paths import get_session_path
 from tg_cli.store.db import init_db
 from tg_cli.store.repo import (
     archive_chats as repo_archive_chats,
+    cancel_message_deletes,
     claim_due_chat_deletes,
+    claim_due_message_deletes,
     delete_chats as repo_delete_chats,
     delete_messages,
     dialog_state_needs_push,
+    finish_message_deletes,
     get_accounts,
     get_chat as repo_get_chat,
     mark_dialog_state_pushed,
     mute_chats as repo_mute_chats,
     pending_delete_ids,
     reschedule_chat_delete,
+    reschedule_message_deletes,
     saved_archive_and_mute_ids,
     upsert_account,
     upsert_chats,
@@ -529,18 +533,6 @@ class EditMessageCmd(WorkerCommand):
         self.text = text
 
 
-class DeleteMessagesCmd(WorkerCommand):
-    def __init__(
-        self,
-        account_id: int,
-        chat_id: int,
-        message_ids: Sequence[int],
-    ) -> None:
-        self.account_id = account_id
-        self.chat_id = chat_id
-        self.message_ids = message_ids
-
-
 class MarkChatReadCmd(WorkerCommand):
     def __init__(
         self,
@@ -692,8 +684,6 @@ class TelethonWorker(threading.Thread):
             await self._handle_send_files(cmd)
         elif isinstance(cmd, EditMessageCmd):
             await self._handle_edit_message(cmd)
-        elif isinstance(cmd, DeleteMessagesCmd):
-            await self._handle_delete_messages(cmd)
         elif isinstance(cmd, MarkChatReadCmd):
             await self._handle_mark_chat_read(cmd)
         elif isinstance(cmd, ArchiveChatsCmd):
@@ -1594,27 +1584,6 @@ class TelethonWorker(threading.Thread):
             logger.warning(f"Failed to edit message: {type(e).__name__}: {e}")
             self._emit("status", {"message": f"Edit failed: {type(e).__name__}", "is_error": True})
 
-    async def _handle_delete_messages(self, cmd: DeleteMessagesCmd) -> None:
-        client = self.clients.get(cmd.account_id)
-        if not client:
-            return
-        try:
-            entity = cmd.chat_id
-            try:
-                entity = await client.get_input_entity(cmd.chat_id)
-            except Exception:
-                try:
-                    entity = await client.get_entity(cmd.chat_id)
-                except Exception:
-                    entity = cmd.chat_id
-
-            await client.delete_messages(entity, list(cmd.message_ids))
-            delete_messages(self.conn, cmd.account_id, cmd.chat_id, cmd.message_ids)
-            self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
-        except Exception as e:
-            logger.warning(f"Failed to delete messages: {type(e).__name__}: {e}")
-            self._emit("status", {"message": f"Delete failed: {type(e).__name__}", "is_error": True})
-
     async def _handle_mark_chat_read(self, cmd: MarkChatReadCmd) -> None:
         client = self.clients.get(cmd.account_id)
         if not client:
@@ -1746,6 +1715,57 @@ class TelethonWorker(threading.Thread):
                 self._emit("chats_changed", {"user_id": account_id})
             finally:
                 self._deletes_in_flight.discard((account_id, chat_id))
+        await self._flush_message_deletes(force)
+
+    async def _flush_message_deletes(self, force: bool = False) -> None:
+        """Send message deletes whose undo window has closed.
+
+        The messages stay hidden while Telegram answers. A delete that keeps
+        failing is dropped, so the messages show again with an error.
+        """
+        claimed = claim_due_message_deletes(
+            self.conn,
+            limit=100 if not force else 5000,
+            force=force,
+        )
+        for account_id, chat_id, revoke, attempts, ids in claimed:
+            # Negative ids never left this machine. Nothing to tell Telegram.
+            local = [mid for mid in ids if mid < 0]
+            remote = [mid for mid in ids if mid > 0]
+            if local:
+                finish_message_deletes(self.conn, account_id, chat_id, local)
+            if not remote:
+                self._emit("messages_changed", {"user_id": account_id, "chat_id": chat_id})
+                continue
+            client = self.clients.get(account_id)
+            if client is None:
+                reschedule_message_deletes(
+                    self.conn, account_id, chat_id, remote, attempts, delay=1.0
+                )
+                continue
+            try:
+                try:
+                    entity = await client.get_input_entity(chat_id)
+                except Exception:
+                    entity = chat_id
+                await client.delete_messages(entity, remote, revoke=revoke)
+            except Exception as e:
+                logger.warning(f"Failed to delete messages: {type(e).__name__}: {e}")
+                nxt = attempts + 1
+                if nxt >= _DELETE_ATTEMPTS or force:
+                    cancel_message_deletes(self.conn, account_id, chat_id, remote)
+                    self._emit("messages_changed", {"user_id": account_id, "chat_id": chat_id})
+                    self._emit(
+                        "status",
+                        {"message": f"Delete failed: {type(e).__name__}", "is_error": True},
+                    )
+                else:
+                    reschedule_message_deletes(
+                        self.conn, account_id, chat_id, remote, nxt
+                    )
+            else:
+                finish_message_deletes(self.conn, account_id, chat_id, remote)
+                self._emit("messages_changed", {"user_id": account_id, "chat_id": chat_id})
 
     async def _finish_login(self, user: Any) -> None:
         user_id = int(getattr(user, "id", 0))

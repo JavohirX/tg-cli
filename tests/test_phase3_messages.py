@@ -394,6 +394,98 @@ async def test_messages_separators_and_skipping():
         assert isinstance(focused, Message)
 
 
+def _ids_on_screen(screen):
+    return [m.message_id for m in screen._all_messages]
+
+
+@pytest.mark.asyncio
+async def test_d_deletes_for_me_and_u_brings_it_back():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+        assert screen.message_list.get_focused_item().message_id == 120
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert 120 not in _ids_on_screen(screen)
+        assert gw.delete_calls[-1] == (alice.user_id, 1, [120], False)
+        assert "Press 'u' to undo" in (screen.status_bar.toast_message or "")
+
+        await pilot.press("u")
+        await pilot.pause()
+        assert 120 in _ids_on_screen(screen)
+
+
+@pytest.mark.asyncio
+async def test_shift_d_asks_before_deleting_for_everyone():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    screen = MessagesScreen(gateway=gw, account=alice, chat=chat)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+
+        await pilot.press("D")
+        await pilot.pause()
+        assert "for everyone" in (screen.status_bar.prompt_message or "")
+        assert gw.delete_calls == []
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert gw.delete_calls == []
+
+        await pilot.press("D", "y")
+        await pilot.pause()
+        assert gw.delete_calls[-1] == (alice.user_id, 1, [120], True)
+
+
+@pytest.mark.asyncio
+async def test_d_in_a_supergroup_asks_because_it_deletes_for_everyone():
+    gw = MessagePagingGateway()
+    alice = gw.get_accounts()[0]
+    chat = gw.get_chat(alice.user_id, 1)
+    supergroup = Chat(
+        account_id=alice.user_id,
+        chat_id=-1001234567890,
+        title="Supergroup",
+        kind=ChatKind.GROUP,
+    )
+    gw.messages[(alice.user_id, supergroup.chat_id)] = [
+        Message(
+            account_id=alice.user_id,
+            chat_id=supergroup.chat_id,
+            message_id=1,
+            sender_name="Bob",
+            date=datetime.now(timezone.utc),
+            plain_text="hello",
+        )
+    ]
+    assert supergroup.deletes_for_everyone
+    assert not chat.deletes_for_everyone
+    screen = MessagesScreen(gateway=gw, account=alice, chat=supergroup)
+    app = TelegramCLIApp(gateway=gw)
+
+    async with app.run_test() as pilot:
+        await app.push_screen(screen)
+        await pilot.pause()
+
+        await pilot.press("d")
+        await pilot.pause()
+        assert "for everyone" in (screen.status_bar.prompt_message or "")
+        await pilot.press("y")
+        await pilot.pause()
+        assert gw.delete_calls[-1] == (alice.user_id, supergroup.chat_id, [1], True)
+
+
 @pytest.mark.asyncio
 async def test_messages_history_paging_up():
     gw = MessagePagingGateway()

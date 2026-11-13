@@ -451,7 +451,17 @@ def get_messages(
     search_query: str = "",
 ) -> list[Message]:
     params: list[object] = [account_id, chat_id]
-    sql = "SELECT * FROM messages WHERE account_id = ? AND chat_id = ?"
+    # A delete still inside its undo window is hidden, not gone.
+    sql = """
+        SELECT * FROM messages m
+        WHERE account_id = ? AND chat_id = ?
+        AND NOT EXISTS (
+            SELECT 1 FROM pending_message_deletes p
+            WHERE p.account_id = m.account_id
+            AND p.chat_id = m.chat_id
+            AND p.message_id = m.message_id
+        )
+    """
     if before_id is not None:
         sql += " AND message_id < ?"
         params.append(before_id)
@@ -591,6 +601,177 @@ def delete_messages(
             """,
             [account_id, chat_id, *message_ids],
         )
+
+
+# Seconds a message delete waits before it is sent to Telegram.
+# Matches the undo toast on the message screen.
+MESSAGE_DELETE_UNDO_SECONDS = 5.0
+
+# How long a claimed delete stays hidden while Telegram answers. A crash
+# inside it leaves the row, so the next start sends the delete again.
+MESSAGE_DELETE_LEASE_SECONDS = 60.0
+
+
+def schedule_message_deletes(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    message_ids: Sequence[int],
+    revoke: bool,
+    delay: float = MESSAGE_DELETE_UNDO_SECONDS,
+) -> None:
+    """Hide messages now and delete them on Telegram after `delay`."""
+    if not message_ids:
+        return
+    not_before = time.time() + delay
+    with conn:
+        conn.executemany(
+            """
+            INSERT INTO pending_message_deletes
+                (account_id, chat_id, message_id, revoke, not_before, attempts)
+            VALUES (?, ?, ?, ?, ?, 0)
+            ON CONFLICT(account_id, chat_id, message_id) DO UPDATE SET
+                revoke = excluded.revoke,
+                not_before = excluded.not_before,
+                attempts = 0
+            """,
+            [
+                (account_id, chat_id, int(mid), 1 if revoke else 0, not_before)
+                for mid in message_ids
+            ],
+        )
+
+
+def cancel_message_deletes(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    message_ids: Sequence[int],
+) -> None:
+    """Drop pending deletes so the messages show again, for example after undo."""
+    if not message_ids:
+        return
+    placeholders = ",".join("?" for _ in message_ids)
+    with conn:
+        conn.execute(
+            f"""
+            DELETE FROM pending_message_deletes
+            WHERE account_id = ? AND chat_id = ? AND message_id IN ({placeholders})
+            """,
+            [account_id, chat_id, *message_ids],
+        )
+
+
+def claim_due_message_deletes(
+    conn: sqlite3.Connection,
+    limit: int = 100,
+    now: float | None = None,
+    force: bool = False,
+) -> list[tuple[int, int, bool, int, list[int]]]:
+    """Lease deletes whose undo window closed, grouped for one Telegram call.
+
+    Returns (account_id, chat_id, revoke, attempts, message_ids). The rows
+    stay, so the messages stay hidden until finish or cancel. `force` takes
+    every row, which is how shutdown sends a delete the user did not undo.
+    """
+    current = time.time() if now is None else now
+    with conn:
+        if force:
+            rows = conn.execute(
+                """
+                SELECT account_id, chat_id, message_id, revoke, attempts
+                FROM pending_message_deletes
+                ORDER BY not_before ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT account_id, chat_id, message_id, revoke, attempts
+                FROM pending_message_deletes
+                WHERE not_before <= ?
+                ORDER BY not_before ASC
+                LIMIT ?
+                """,
+                (current, limit),
+            ).fetchall()
+        groups: dict[tuple[int, int, bool], tuple[int, list[int]]] = {}
+        for r in rows:
+            key = (int(r["account_id"]), int(r["chat_id"]), bool(r["revoke"]))
+            attempts, ids = groups.get(key, (0, []))
+            ids.append(int(r["message_id"]))
+            groups[key] = (max(attempts, int(r["attempts"] or 0)), ids)
+            conn.execute(
+                """
+                UPDATE pending_message_deletes SET not_before = ?
+                WHERE account_id = ? AND chat_id = ? AND message_id = ?
+                """,
+                (current + MESSAGE_DELETE_LEASE_SECONDS, *key[:2], int(r["message_id"])),
+            )
+    return [
+        (account_id, chat_id, revoke, attempts, ids)
+        for (account_id, chat_id, revoke), (attempts, ids) in groups.items()
+    ]
+
+
+def finish_message_deletes(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    message_ids: Sequence[int],
+) -> None:
+    """Telegram took the delete. Remove the rows and their queue entries."""
+    if not message_ids:
+        return
+    placeholders = ",".join("?" for _ in message_ids)
+    params = [account_id, chat_id, *message_ids]
+    with conn:
+        conn.execute(
+            f"""
+            DELETE FROM pending_message_deletes
+            WHERE account_id = ? AND chat_id = ? AND message_id IN ({placeholders})
+            """,
+            params,
+        )
+        conn.execute(
+            f"""
+            DELETE FROM messages
+            WHERE account_id = ? AND chat_id = ? AND message_id IN ({placeholders})
+            """,
+            params,
+        )
+
+
+def reschedule_message_deletes(
+    conn: sqlite3.Connection,
+    account_id: int,
+    chat_id: int,
+    message_ids: Sequence[int],
+    attempts: int,
+    delay: float = MESSAGE_DELETE_UNDO_SECONDS,
+) -> None:
+    """Try a failed delete again later. Undo may already have removed the rows."""
+    if not message_ids:
+        return
+    placeholders = ",".join("?" for _ in message_ids)
+    with conn:
+        conn.execute(
+            f"""
+            UPDATE pending_message_deletes SET not_before = ?, attempts = ?
+            WHERE account_id = ? AND chat_id = ? AND message_id IN ({placeholders})
+            """,
+            [time.time() + delay, attempts, account_id, chat_id, *message_ids],
+        )
+
+
+def min_message_id(conn: sqlite3.Connection) -> int:
+    """Lowest message id stored. Local placeholders count down below zero."""
+    row = conn.execute("SELECT MIN(message_id) AS low FROM messages").fetchone()
+    if row is None or row["low"] is None:
+        return 0
+    return int(row["low"])
 
 
 # Draft operations

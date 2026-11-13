@@ -4,7 +4,6 @@ Renders virtualized chat list, folders, accounts strip, filter bar, and status/f
 
 from __future__ import annotations
 
-import time
 from typing import Any, Callable
 from rich.text import Text
 from textual.app import ComposeResult
@@ -18,6 +17,7 @@ from tg_cli.domain.models import Account, Chat, Folder
 from tg_cli.domain.render import render_chat_row
 from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import AccountStrip, FolderStrip, FooterBar, StatusBar
+from tg_cli.ui.undo import UndoSlot
 from tg_cli.ui.window import WindowedList
 
 ARCHIVE_CHAT_ID = -1000
@@ -76,13 +76,12 @@ class ChatsScreen(Screen):
         self.current_folder_id: int | None = None
         self.filter_query: str = ""
 
-        # Pending undo state: (description, undo_callback, expiry_timestamp)
-        self._pending_undo: tuple[str, Callable[[], None], float] | None = None
         self._pending_confirm: tuple[str, Callable[[], None]] | None = None
 
         self.account_strip = AccountStrip()
         self.folder_strip = FolderStrip()
         self.status_bar = StatusBar()
+        self.undo = UndoSlot(self.status_bar)
         self.footer_bar = FooterBar(context="chats")
         self.filter_input = PasteInput(placeholder="Filter chats...", id="filter-input")
 
@@ -114,7 +113,7 @@ class ChatsScreen(Screen):
 
         self.refresh_chats(initial=True)
         self.chat_list.focus()
-        self.set_interval(1.0, self._tick_undo)
+        self.set_interval(1.0, self.undo.tick)
 
         if hasattr(self.gateway, "register_listener"):
             self.gateway.register_listener(self._on_gateway_event)
@@ -376,7 +375,7 @@ class ChatsScreen(Screen):
             self.refresh_chats()
 
         state_label = "archived" if new_state else "unarchived"
-        self._set_undoable(f"{len(targets)} chat(s) {state_label}", do_undo)
+        self.undo.set(f"{len(targets)} chat(s) {state_label}", do_undo)
 
     def action_toggle_mute(self) -> None:
         targets = self._get_target_chats()
@@ -396,7 +395,7 @@ class ChatsScreen(Screen):
             self.refresh_chats()
 
         state_label = "muted" if new_state else "unmuted"
-        self._set_undoable(f"{len(targets)} chat(s) {state_label}", do_undo)
+        self.undo.set(f"{len(targets)} chat(s) {state_label}", do_undo)
 
     def action_mark_read(self) -> None:
         targets = self._get_target_chats()
@@ -414,7 +413,7 @@ class ChatsScreen(Screen):
                 self.gateway.mark_chats_read(self.account.user_id, [cid], read=(count == 0))
             self.refresh_chats()
 
-        self._set_undoable(f"Marked {len(targets)} chat(s) as read", do_undo)
+        self.undo.set(f"Marked {len(targets)} chat(s) as read", do_undo)
 
     def action_mark_unread(self) -> None:
         targets = self._get_target_chats()
@@ -432,7 +431,7 @@ class ChatsScreen(Screen):
                 self.gateway.mark_chats_read(self.account.user_id, [cid], read=(count == 0))
             self.refresh_chats()
 
-        self._set_undoable(f"Marked {len(targets)} chat(s) as unread", do_undo)
+        self.undo.set(f"Marked {len(targets)} chat(s) as unread", do_undo)
 
     def action_delete_chat(self) -> None:
         targets = self._get_target_chats()
@@ -456,7 +455,7 @@ class ChatsScreen(Screen):
                 self.gateway.restore_chats(self.account.user_id, valid_old_chats)
                 self.refresh_chats()
 
-            self._set_undoable(f"Deleted {count} chat(s)", do_undo)
+            self.undo.set(f"Deleted {count} chat(s)", do_undo)
 
         # If more than 10 chats, ask y/n confirmation first
         if count > 10:
@@ -467,28 +466,8 @@ class ChatsScreen(Screen):
         else:
             do_delete()
 
-    def _set_undoable(self, description: str, undo_fn: Callable[[], None]) -> None:
-        expiry = time.time() + 5.0
-        self._pending_undo = (description, undo_fn, expiry)
-        self.status_bar.set_toast(f"{description}. Press 'u' to undo (5s)")
-
     def action_undo_action(self) -> None:
-        if self._pending_undo is not None:
-            desc, undo_fn, _ = self._pending_undo
-            self._pending_undo = None
-            undo_fn()
-            self.status_bar.set_toast(f"Undone: {desc}")
-            self.status_bar.refresh()
-
-    def _tick_undo(self) -> None:
-        if self._pending_undo is not None:
-            desc, _, expiry = self._pending_undo
-            remaining = int(expiry - time.time())
-            if remaining <= 0:
-                self._pending_undo = None
-                self.status_bar.set_toast(None)
-            else:
-                self.status_bar.set_toast(f"{desc}. Press 'u' to undo ({remaining}s)")
+        self.undo.undo()
 
     def _request_confirm(self, prompt: str, on_confirm: Callable[[], None]) -> None:
         self._pending_confirm = (prompt, on_confirm)
@@ -500,7 +479,6 @@ class ChatsScreen(Screen):
         self._request_confirm(event.prompt, event.on_confirm)
 
     def on_key(self, event: Key) -> None:
-        # Handle pending confirmation prompt inline
         if self._pending_confirm is not None:
             prompt, on_confirm = self._pending_confirm
             if event.character in ("y", "Y"):
@@ -511,27 +489,10 @@ class ChatsScreen(Screen):
                 self._pending_confirm = None
                 self.status_bar.set_prompt(None)
                 self.status_bar.set_status("Action cancelled.")
+            # Other keys wait for the answer, so a second action cannot start.
             event.prevent_default()
             event.stop()
             return
-
-    def on_key(self, event: Key) -> None:
-        if self._pending_confirm is not None:
-            prompt, on_confirm = self._pending_confirm
-            if event.character in ("y", "Y"):
-                self._pending_confirm = None
-                self.status_bar.set_prompt(None)
-                on_confirm()
-                event.prevent_default()
-                event.stop()
-                return
-            elif event.character in ("n", "N") or event.key == "escape":
-                self._pending_confirm = None
-                self.status_bar.set_prompt(None)
-                self.status_bar.set_status("Action cancelled.")
-                event.prevent_default()
-                event.stop()
-                return
 
         container = self.query_one("#filter-container")
         if not container.display:

@@ -116,7 +116,9 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 | `Ctrl+J` / `\`+Enter | Insert newline in composer |
 | `r` | Reply to focused message |
 | `e` | Edit focused message (if sent by me) |
-| `d` | Delete focused message(s) |
+| `d` | Delete focused or selected messages for me (undoable 5s). Supergroups and channels have no delete-for-me, so it asks first |
+| `D` | Delete for everyone (asks y/n, then undoable 5s) |
+| `u` | Undo the last delete within 5 seconds |
 | `t` | Transcribe voice message with Gemini (cached) |
 | `T` | Force re-transcribe voice message (bypasses cache) |
 | `y` | Copy message text to system clipboard |

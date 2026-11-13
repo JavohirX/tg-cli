@@ -119,8 +119,21 @@ class Gateway(Protocol):
         account_id: int,
         chat_id: int,
         message_ids: Sequence[int],
+        revoke: bool = False,
     ) -> None:
-        """Delete messages by id."""
+        """Hide messages now; delete them on Telegram after the undo window.
+
+        `revoke` deletes for everyone. Supergroups and channels always do.
+        """
+        ...
+
+    def restore_messages(
+        self,
+        account_id: int,
+        chat_id: int,
+        message_ids: Sequence[int],
+    ) -> None:
+        """Undo a delete that has not reached Telegram yet."""
         ...
 
     def archive_chats(

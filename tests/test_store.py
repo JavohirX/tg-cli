@@ -21,7 +21,13 @@ from tg_cli.store.repo import (
     clear_draft,
     delete_account,
     cancel_chat_deletes,
+    cancel_message_deletes,
     claim_due_chat_deletes,
+    claim_due_message_deletes,
+    finish_message_deletes,
+    min_message_id,
+    reschedule_message_deletes,
+    schedule_message_deletes,
     delete_chats,
     delete_messages,
     get_accounts,
@@ -158,6 +164,66 @@ def test_pending_chat_delete_waits_for_undo(conn):
     forced = claim_due_chat_deletes(conn, force=True)
     assert forced == [(1, 20, 0)]
     assert pending_delete_ids(conn, 1) == set()
+
+
+def _store_messages(conn, ids):
+    upsert_account(conn, Account(user_id=1, phone="+1000"))
+    upsert_chats(conn, [Chat(account_id=1, chat_id=5, title="Notes")])
+    upsert_messages(conn, [
+        Message(account_id=1, chat_id=5, message_id=mid, plain_text=f"m{mid}")
+        for mid in ids
+    ])
+
+
+def _visible_ids(conn):
+    return [m.message_id for m in get_messages(conn, 1, 5)]
+
+
+def test_pending_message_delete_hides_until_undo(conn):
+    _store_messages(conn, [1, 2, 3])
+    schedule_message_deletes(conn, 1, 5, [2, 3], revoke=False)
+    assert _visible_ids(conn) == [1]
+    assert claim_due_message_deletes(conn) == []
+
+    cancel_message_deletes(conn, 1, 5, [3])
+    assert _visible_ids(conn) == [1, 3]
+
+
+def test_claimed_message_delete_stays_hidden_until_finished(conn):
+    _store_messages(conn, [1, 2, 3])
+    schedule_message_deletes(conn, 1, 5, [2], revoke=True)
+    schedule_message_deletes(conn, 1, 5, [3], revoke=False)
+
+    claimed = claim_due_message_deletes(conn, now=time.time() + 30)
+    assert sorted(claimed) == [(1, 5, False, 0, [3]), (1, 5, True, 0, [2])]
+    # Leased, not dropped: the rows stay hidden while Telegram answers.
+    assert _visible_ids(conn) == [1]
+    assert claim_due_message_deletes(conn, now=time.time() + 31) == []
+
+    finish_message_deletes(conn, 1, 5, [2])
+    assert _visible_ids(conn) == [1]
+    cancel_message_deletes(conn, 1, 5, [3])
+    assert _visible_ids(conn) == [1, 3]
+
+
+def test_failed_message_delete_is_retried_later(conn):
+    _store_messages(conn, [1])
+    schedule_message_deletes(conn, 1, 5, [1], revoke=False)
+    claim_due_message_deletes(conn, now=time.time() + 30)
+    reschedule_message_deletes(conn, 1, 5, [1], attempts=1, delay=0)
+    assert claim_due_message_deletes(conn, now=time.time() + 1) == [(1, 5, False, 1, [1])]
+
+
+def test_forced_claim_takes_deletes_still_in_their_window(conn):
+    _store_messages(conn, [1])
+    schedule_message_deletes(conn, 1, 5, [1], revoke=False, delay=30)
+    assert claim_due_message_deletes(conn, force=True) == [(1, 5, False, 0, [1])]
+
+
+def test_min_message_id_sees_local_placeholders(conn):
+    assert min_message_id(conn) == 0
+    _store_messages(conn, [-4, 7])
+    assert min_message_id(conn) == -4
 
 
 def test_messages_and_drafts(conn):

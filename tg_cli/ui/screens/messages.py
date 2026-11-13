@@ -44,6 +44,7 @@ from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import FooterBar, StatusBar
 from tg_cli.ui.clipboard import copy_text
 from tg_cli.ui.composer import Composer
+from tg_cli.ui.undo import UndoSlot
 from tg_cli.ui.window import WindowedList
 
 
@@ -85,6 +86,8 @@ class MessagesScreen(Screen):
         Binding("r", "reply_focused", "Reply", show=False),
         Binding("e", "edit_focused", "Edit", show=False),
         Binding("d", "delete_focused", "Delete", show=False),
+        Binding("D", "delete_for_everyone", "Delete for Everyone", show=False),
+        Binding("u", "undo_action", "Undo", show=False),
         Binding("t", "transcribe_focused", "Transcribe", show=False),
         Binding("T", "retranscribe_focused", "Re-transcribe", show=False),
         Binding("y", "yank_focused", "Copy Text", show=False),
@@ -126,6 +129,7 @@ class MessagesScreen(Screen):
 
         self.chat_header = Static("", id="chat-header")
         self.status_bar = StatusBar()
+        self.undo = UndoSlot(self.status_bar)
         self.footer_bar = FooterBar(context="messages", is_write_mode=False)
         self.composer = Composer(id="message-composer")
         self.filter_input = PasteInput(placeholder="Search messages...", id="filter-input")
@@ -159,6 +163,7 @@ class MessagesScreen(Screen):
         self.refresh_messages(initial=True)
         self.message_list.focus()
         self.call_after_refresh(self._scroll_to_latest)
+        self.set_interval(1.0, self.undo.tick)
 
         # Listen for real-time messages from gateway
         if hasattr(self.gateway, "register_listener"):
@@ -748,23 +753,65 @@ class MessagesScreen(Screen):
             )
             self._set_focus_mode(is_write=True)
 
+    def _delete_targets(self) -> list[Message]:
+        """Selected messages, or the focused one when nothing is selected."""
+        selected = self.message_list.get_selected_items()
+        if not selected:
+            focused = self.message_list.get_focused_item()
+            selected = [focused] if focused is not None else []
+        return [m for m in selected if isinstance(m, Message)]
+
     def action_delete_focused(self) -> None:
+        """Delete for me. Supergroups and channels have no such thing, so ask."""
         if self.is_write_mode:
             return
-        selected = self.message_list.get_selected_items()
-        raw_targets = selected if selected else ([self.message_list.get_focused_item()] if self.message_list.get_focused_item() else [])
-        targets = [m for m in raw_targets if isinstance(m, Message)]
+        targets = self._delete_targets()
         if not targets:
             return
+        if self.chat.deletes_for_everyone:
+            self._confirm_delete_for_everyone(targets)
+            return
+        self._delete_messages(targets, revoke=False)
+
+    def action_delete_for_everyone(self) -> None:
+        if self.is_write_mode:
+            return
+        targets = self._delete_targets()
+        if targets:
+            self._confirm_delete_for_everyone(targets)
+
+    def _confirm_delete_for_everyone(self, targets: list[Message]) -> None:
+        self._request_confirm(
+            f"Delete {len(targets)} message(s) for everyone? (y/n)",
+            lambda: self._delete_messages(targets, revoke=True),
+        )
+
+    def _delete_messages(self, targets: list[Message], *, revoke: bool) -> None:
+        """Hide the messages now. Telegram gets the delete when undo runs out."""
         target_ids = [m.message_id for m in targets]
         self.gateway.delete_messages(
             account_id=self.account.user_id,
             chat_id=self.chat.chat_id,
             message_ids=target_ids,
+            revoke=revoke,
         )
         self.message_list.clear_selection()
         self.refresh_messages(initial=False)
-        self.status_bar.set_status(f"Deleted {len(target_ids)} message(s).")
+
+        def do_undo() -> None:
+            self.gateway.restore_messages(
+                self.account.user_id, self.chat.chat_id, target_ids
+            )
+            self.refresh_messages(initial=False)
+
+        scope = " for everyone" if revoke else ""
+        self.undo.set(f"Deleted {len(target_ids)} message(s){scope}", do_undo)
+
+    def action_undo_action(self) -> None:
+        if self.is_write_mode:
+            return
+        if not self.undo.undo():
+            self.status_bar.set_status("Nothing to undo.")
 
     def action_transcribe_focused(self) -> None:
         self._transcribe_focused(force=False)
@@ -1117,6 +1164,13 @@ class MessagesScreen(Screen):
                     self.action_edit_focused()
                 case "delete_message":
                     self.action_delete_focused()
+                case "delete_message_everyone":
+                    # The palette already asked y/n for this one.
+                    targets = self._delete_targets()
+                    if targets:
+                        self._delete_messages(targets, revoke=True)
+                case "undo":
+                    self.action_undo_action()
                 case "transcribe_voice":
                     self.action_transcribe_focused()
                 case "retranscribe_voice":
