@@ -48,6 +48,7 @@ from tg_cli.telegram.gateway import Gateway
 from tg_cli.ui.chrome import FooterBar, StatusBar
 from tg_cli.ui.clipboard import copy_text
 from tg_cli.ui.composer import Composer
+from tg_cli.ui.screens.forward import ForwardPicker
 from tg_cli.ui.undo import UndoSlot
 from tg_cli.ui.window import WindowedList
 
@@ -103,6 +104,7 @@ class MessagesScreen(Screen):
         Binding("T", "retranscribe_focused", "Re-transcribe", show=False),
         Binding("y", "yank_focused", "Copy Text", show=False),
         Binding("o", "open_link", "Open Link", show=False),
+        Binding("f", "forward_messages", "Forward", show=False),
         Binding("z,Z", "toggle_expand", "Expand/Collapse", show=False, priority=True),
         Binding("?", "show_help", "Help", show=False),
         Binding("f1", "show_help", "Help", show=False),
@@ -794,7 +796,7 @@ class MessagesScreen(Screen):
             )
             self._set_focus_mode(is_write=True)
 
-    def _delete_targets(self) -> list[Message]:
+    def _action_targets(self) -> list[Message]:
         """Selected messages, or the focused one when nothing is selected."""
         selected = self.message_list.get_selected_items()
         if not selected:
@@ -806,7 +808,7 @@ class MessagesScreen(Screen):
         """Delete for me. Supergroups and channels have no such thing, so ask."""
         if self.is_write_mode:
             return
-        targets = self._delete_targets()
+        targets = self._action_targets()
         if not targets:
             return
         if self.chat.deletes_for_everyone:
@@ -817,7 +819,7 @@ class MessagesScreen(Screen):
     def action_delete_for_everyone(self) -> None:
         if self.is_write_mode:
             return
-        targets = self._delete_targets()
+        targets = self._action_targets()
         if targets:
             self._confirm_delete_for_everyone(targets)
 
@@ -847,6 +849,47 @@ class MessagesScreen(Screen):
 
         scope = " for everyone" if revoke else ""
         self.undo.set(f"Deleted {len(target_ids)} message(s){scope}", do_undo)
+
+    def action_forward_messages(self) -> None:
+        if self.is_write_mode:
+            return
+        targets = [
+            m for m in self._action_targets()
+            # Unsent placeholders and service lines cannot be forwarded.
+            if m.message_id > 0 and not m.is_deleted and m.kind != MessageKind.SERVICE
+        ]
+        if not targets:
+            self.status_bar.set_status("Nothing to forward.", is_error=True)
+            return
+        chats = self.gateway.get_chats(account_id=self.account.user_id)
+        archived = self.gateway.get_chats(account_id=self.account.user_id, folder_id=-2)
+        seen = {c.chat_id for c in chats}
+        chats += [c for c in archived if c.chat_id not in seen]
+        self.app.push_screen(
+            ForwardPicker(chats, count=len(targets)),
+            callback=partial(self._forward_to, targets),
+        )
+
+    def _forward_to(
+        self, targets: list[Message], choice: tuple[Chat, bool] | None
+    ) -> None:
+        if choice is None:
+            self.status_bar.set_status("Forward cancelled.")
+            return
+        destination, hide_sender = choice
+        self.gateway.forward_messages(
+            self.account.user_id,
+            self.chat.chat_id,
+            [m.message_id for m in targets],
+            destination.chat_id,
+            drop_author=hide_sender,
+        )
+        self.message_list.clear_selection()
+        if destination.chat_id == self.chat.chat_id:
+            self.refresh_messages(initial=False, jump_to_end=True)
+        self.status_bar.set_status(
+            f"Forwarding {len(targets)} message(s) to {destination.title}..."
+        )
 
     def action_undo_action(self) -> None:
         if self.is_write_mode:
@@ -1274,7 +1317,7 @@ class MessagesScreen(Screen):
                     self.action_delete_focused()
                 case "delete_message_everyone":
                     # The palette already asked y/n for this one.
-                    targets = self._delete_targets()
+                    targets = self._action_targets()
                     if targets:
                         self._delete_messages(targets, revoke=True)
                 case "undo":
@@ -1287,6 +1330,8 @@ class MessagesScreen(Screen):
                     self.action_yank_focused()
                 case "open_link":
                     self.action_open_link()
+                case "forward_messages":
+                    self.action_forward_messages()
                 case "toggle_expand":
                     self.action_toggle_expand()
                 case "filter":

@@ -136,6 +136,17 @@ class Gateway(Protocol):
         """Undo a delete that has not reached Telegram yet."""
         ...
 
+    def forward_messages(
+        self,
+        account_id: int,
+        from_chat_id: int,
+        message_ids: Sequence[int],
+        to_chat_id: int,
+        drop_author: bool = False,
+    ) -> None:
+        """Forward messages. `drop_author` hides the original sender."""
+        ...
+
     def archive_chats(
         self,
         account_id: int,

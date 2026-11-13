@@ -124,6 +124,7 @@ Secrets, database files, and logs live strictly inside the user's roaming AppDat
 | `T` | Force re-transcribe voice message (bypasses cache) |
 | `y` | Copy message text to system clipboard; with a selection, copy it as `[time] Sender: text` lines |
 | `o` | Open the link in the focused message; `o` again opens the next one |
+| `f` | Forward focused or selected messages: type to find a chat, `Enter` sends, `Tab` hides the original sender |
 | `z` | Toggle message clamping (expand/collapse > 4 lines) |
 | `/` | Search loaded messages or query older history from Telegram |
 | `Esc` | Clear reply/edit context, defocus composer, or return to chat list |

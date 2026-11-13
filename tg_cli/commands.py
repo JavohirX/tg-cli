@@ -331,6 +331,14 @@ COMMANDS: tuple[Command, ...] = (
         description="Copy the focused message, or the selected ones as a transcript. Drag any text, then Ctrl+C or right-click",
     ),
     Command(
+        id="forward_messages",
+        title="Forward",
+        keys=("f",),
+        display_key="f",
+        contexts=("messages",),
+        description="Forward focused or selected messages; Tab in the picker hides the sender",
+    ),
+    Command(
         id="open_link",
         title="Open Link",
         keys=("o",),

@@ -70,6 +70,7 @@ class FakeGateway:
         # Deleted inside the undo window, so restore_messages can put them back.
         self.deleted_messages: dict[tuple[int, int], dict[int, Message]] = {}
         self.delete_calls: list[tuple[int, int, list[int], bool]] = []
+        self.forward_calls: list[tuple[int, int, list[int], int, bool]] = []
         self.drafts: dict[tuple[int, int], Draft] = {}
         self.transcripts: dict[tuple[int, int, int], Transcript] = {}
         self.sent_files: list[dict] = []
@@ -595,6 +596,41 @@ class FakeGateway:
             if m is not None:
                 msgs.append(m)
         msgs.sort(key=lambda m: m.message_id)
+
+    def forward_messages(
+        self,
+        account_id: int,
+        from_chat_id: int,
+        message_ids: Sequence[int],
+        to_chat_id: int,
+        drop_author: bool = False,
+    ) -> None:
+        self.forward_calls.append(
+            (account_id, from_chat_id, list(message_ids), to_chat_id, drop_author)
+        )
+        source = {m.message_id: m for m in self.messages.get((account_id, from_chat_id), [])}
+        dest = self.messages.setdefault((account_id, to_chat_id), [])
+        next_id = (dest[-1].message_id + 1) if dest else 1
+        for mid in message_ids:
+            original = source.get(mid)
+            if original is None:
+                continue
+            dest.append(
+                Message(
+                    account_id=account_id,
+                    chat_id=to_chat_id,
+                    message_id=next_id,
+                    sender_id=account_id,
+                    sender_name="Me",
+                    date=datetime.now(timezone.utc),
+                    kind=original.kind,
+                    plain_text=original.plain_text,
+                    caption=original.caption,
+                    forward_label="" if drop_author else original.sender_name,
+                    outgoing=True,
+                )
+            )
+            next_id += 1
 
     def archive_chats(
         self,

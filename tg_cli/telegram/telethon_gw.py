@@ -64,6 +64,7 @@ from tg_cli.telegram.worker import (
     DisconnectAccountCmd,
     DownloadVoiceCmd,
     EditMessageCmd,
+    ForwardMessagesCmd,
     FetchMessagesCmd,
     FetchRolesCmd,
     GetProfileCmd,
@@ -424,6 +425,24 @@ class TelethonGateway:
         message_ids: Sequence[int],
     ) -> None:
         cancel_message_deletes(self.conn, account_id, chat_id, message_ids)
+
+    def forward_messages(
+        self,
+        account_id: int,
+        from_chat_id: int,
+        message_ids: Sequence[int],
+        to_chat_id: int,
+        drop_author: bool = False,
+    ) -> None:
+        self.worker.submit_command(
+            ForwardMessagesCmd(
+                account_id=account_id,
+                from_chat_id=from_chat_id,
+                message_ids=list(message_ids),
+                to_chat_id=to_chat_id,
+                drop_author=drop_author,
+            )
+        )
 
     def archive_chats(
         self,

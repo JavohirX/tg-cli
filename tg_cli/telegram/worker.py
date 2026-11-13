@@ -539,6 +539,22 @@ class SendFilesCmd(WorkerCommand):
         self.reply_to_id = reply_to_id
 
 
+class ForwardMessagesCmd(WorkerCommand):
+    def __init__(
+        self,
+        account_id: int,
+        from_chat_id: int,
+        message_ids: Sequence[int],
+        to_chat_id: int,
+        drop_author: bool = False,
+    ) -> None:
+        self.account_id = account_id
+        self.from_chat_id = from_chat_id
+        self.message_ids = message_ids
+        self.to_chat_id = to_chat_id
+        self.drop_author = drop_author
+
+
 class EditMessageCmd(WorkerCommand):
     def __init__(
         self,
@@ -711,6 +727,8 @@ class TelethonWorker(threading.Thread):
             await self._handle_send_files(cmd)
         elif isinstance(cmd, EditMessageCmd):
             await self._handle_edit_message(cmd)
+        elif isinstance(cmd, ForwardMessagesCmd):
+            await self._handle_forward_messages(cmd)
         elif isinstance(cmd, MarkChatReadCmd):
             await self._handle_mark_chat_read(cmd)
         elif isinstance(cmd, ArchiveChatsCmd):
@@ -1607,6 +1625,45 @@ class TelethonWorker(threading.Thread):
                     (SendState.FAILED.value, cmd.account_id, cmd.chat_id, temp_id),
                 )
         self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.chat_id})
+
+    async def _handle_forward_messages(self, cmd: ForwardMessagesCmd) -> None:
+        client = self.clients.get(cmd.account_id)
+        if not client:
+            self._emit("status", {"message": "Forward failed: account is offline", "is_error": True})
+            return
+        try:
+            try:
+                to_entity = await client.get_input_entity(cmd.to_chat_id)
+            except Exception:
+                to_entity = cmd.to_chat_id
+            try:
+                from_entity = await client.get_input_entity(cmd.from_chat_id)
+            except Exception:
+                from_entity = cmd.from_chat_id
+            sent = await client.forward_messages(
+                to_entity,
+                list(cmd.message_ids),
+                from_peer=from_entity,
+                drop_author=cmd.drop_author,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to forward messages: {type(e).__name__}: {e}")
+            self._emit("status", {"message": f"Forward failed: {type(e).__name__}", "is_error": True})
+            return
+        sent_list = sent if isinstance(sent, (list, tuple)) else [sent]
+        mapped = [
+            map_telethon_message_to_domain(m, cmd.account_id, cmd.to_chat_id)
+            for m in sent_list
+            if m is not None
+        ]
+        if mapped:
+            try:
+                upsert_messages(self.conn, mapped)
+            except Exception as e:
+                logger.warning(f"Could not store forwarded messages: {type(e).__name__}: {e}")
+        self._emit("messages_changed", {"user_id": cmd.account_id, "chat_id": cmd.to_chat_id})
+        self._emit("chats_changed", {"user_id": cmd.account_id})
+        self._emit("status", {"message": f"Forwarded {len(cmd.message_ids)} message(s).", "is_error": False})
 
     async def _handle_edit_message(self, cmd: EditMessageCmd) -> None:
         client = self.clients.get(cmd.account_id)
